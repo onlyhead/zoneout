@@ -516,12 +516,47 @@ namespace zoneout {
                 if (border_it != feature.properties.end() && border_it->second == "true") {
                     if (std::holds_alternative<dp::Polygon>(feature.geometry)) {
                         poly.field_boundary_ = std::get<dp::Polygon>(feature.geometry);
+
+                        if (poly.meta_.name.empty()) {
+                            auto name_it = feature.properties.find("name");
+                            if (name_it != feature.properties.end()) {
+                                poly.meta_.name = name_it->second;
+                                const std::string suffix = "_boundary";
+                                if (poly.meta_.name.size() > suffix.size() &&
+                                    poly.meta_.name.substr(poly.meta_.name.size() - suffix.size()) == suffix) {
+                                    poly.meta_.name.erase(poly.meta_.name.size() - suffix.size());
+                                }
+                            }
+                        }
+
+                        if (poly.meta_.type.empty()) {
+                            auto type_it = feature.properties.find("type");
+                            if (type_it != feature.properties.end()) {
+                                poly.meta_.type = type_it->second;
+                            }
+                        }
+
+                        if (poly.meta_.subtype.empty()) {
+                            auto subtype_it = feature.properties.find("subtype");
+                            if (subtype_it != feature.properties.end()) {
+                                poly.meta_.subtype = subtype_it->second;
+                            }
+                        }
+
+                        if (poly.meta_.id.isNull()) {
+                            auto uuid_it = feature.properties.find("uuid");
+                            if (uuid_it != feature.properties.end()) {
+                                poly.meta_.id = UUID(uuid_it->second);
+                            }
+                        }
+
                         break;
                     }
                 }
             }
 
             poly.load_structured_elements();
+            poly.sync_to_global_properties();
 
             return poly;
         }
@@ -539,6 +574,7 @@ namespace zoneout {
                         boundary_exists = true;
                         feature.properties["uuid"] = meta_.id.toString();
                         feature.properties["name"] = meta_.name + "_boundary";
+                        feature.properties["type"] = meta_.type;
                         feature.properties["subtype"] = meta_.subtype;
                         break;
                     }
@@ -551,6 +587,7 @@ namespace zoneout {
                     boundary_feature.properties["border"] = "true";
                     boundary_feature.properties["uuid"] = meta_.id.toString();
                     boundary_feature.properties["name"] = meta_.name + "_boundary";
+                    boundary_feature.properties["type"] = meta_.type;
                     boundary_feature.properties["subtype"] = meta_.subtype;
                     const_cast<Poly *>(this)->collection_.features.push_back(boundary_feature);
                 }

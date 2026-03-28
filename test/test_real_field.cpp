@@ -41,7 +41,7 @@ TEST_CASE("Test real irregular field from misc/field4.geojson") {
         zone.save(output_dir);
 
         // Get the grid info for analysis
-        const auto &grid_data = zone.raster_data();
+        const auto &grid_data = zone.plot().grid().raster();
         if (!grid_data.layers.empty()) {
             const auto &first_layer = grid_data.layers[0];
 

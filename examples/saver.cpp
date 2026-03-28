@@ -1,116 +1,35 @@
 #include "zoneout/zoneout.hpp"
 
-#include "datapod/datapod.hpp"
-#include "geoget/geoget.hpp"
-#include "rerun.hpp"
-#include "rerun/recording_stream.hpp"
-#include <entropy/generator.hpp>
-#include <iomanip>
 #include <iostream>
 
 namespace dp = datapod;
 
-zoneout::Plot create_field(const std::string &zone_name, const std::string &crop_type,
-                           const dp::Geo &datum = dp::Geo{51.98776171041831, 5.662378206146002, 0.0}) {
-    zoneout::Plot plot("Wageningen Farm", "agricultural", datum);
-    plot.set_property("farm_type", "research");
-    plot.set_property("owner", "Wageningen Research Labs");
-
-    typedef std::unordered_map<std::string, std::string> Props;
-
-    geoget::PolygonDrawer drawer(datum);
-    if (drawer.start(8080)) {
-        const auto polygons = drawer.get_polygons();
-        drawer.stop();
-
-        if (!polygons.empty()) {
-            zoneout::Zone zone(zone_name, "field", polygons.front(), datum, 0.1);
-            const auto &base_grid = std::get<dp::Grid<uint8_t>>(zone.grid().get_layer(0).grid);
-
-            auto temp_grid = base_grid;
-            auto moisture_grid = base_grid;
-
-            entropy::noise::NoiseGen temp_noise, moisture_noise;
-            temp_noise.SetNoiseType(entropy::noise::NoiseGen::NoiseType_Perlin);
-            temp_noise.SetFrequency(0.08f);
-            temp_noise.SetSeed(std::random_device{}());
-
-            moisture_noise.SetNoiseType(entropy::noise::NoiseGen::NoiseType_OpenSimplex2);
-            moisture_noise.SetFrequency(0.05f);
-            moisture_noise.SetSeed(std::random_device{}() + 100);
-
-            for (size_t r = 0; r < temp_grid.rows; ++r) {
-                for (size_t c = 0; c < temp_grid.cols; ++c) {
-                    float temp_noise_val = temp_noise.GetNoise(static_cast<float>(r), static_cast<float>(c));
-                    uint8_t temp_value = static_cast<uint8_t>(15 + (temp_noise_val + 1.0f) * 0.5f * (35 - 15));
-                    temp_grid(r, c) = temp_value;
-
-                    float moisture_noise_val = moisture_noise.GetNoise(static_cast<float>(r), static_cast<float>(c));
-                    uint8_t moisture_value = static_cast<uint8_t>(20 + (moisture_noise_val + 1.0f) * 0.5f * (80 - 20));
-                    moisture_grid(r, c) = moisture_value;
-                }
-            }
-
-            zone.add_raster_layer(temp_grid, "temperature", "environmental", {{"units", "celsius"}}, true);
-            zone.add_raster_layer(moisture_grid, "moisture", "environmental", {{"units", "percentage"}}, true);
-
-            zone.set_property("crop_type", crop_type);
-            zone.set_property("planting_date", "2024-04-15");
-            zone.set_property("irrigation", "true");
-
-            plot.add_zone(zone);
-            std::cout << "Added zone: " << zone.name() << " (ID: " << zone.id().toString() << ")" << std::endl;
-
-            // Add remaining polygons as features to the zone that's now in the plot
-            if (plot.zone_count() > 0) {
-                auto &plot_zone = plot.zones().back(); // Get the zone we just added
-
-                for (size_t i = 1; i < polygons.size(); ++i) {
-                    Props properties = {{"area_m2", std::to_string(static_cast<int>(polygons[i].area()))}};
-                    std::string feature_name = zone_name + "_feature_" + std::to_string(i);
-                    try {
-                        plot_zone.add_polygon_element(polygons[i], feature_name, "obstacle", "obstacle", properties);
-                    } catch (const std::exception &e) {
-                        std::cout << "Failed to add feature " << feature_name << ": " << e.what() << std::endl;
-                    }
-                }
-            }
-        }
+namespace {
+    dp::Polygon rectangle(double x, double y, double width, double height) {
+        dp::Polygon poly;
+        poly.vertices.emplace_back(x, y, 0.0);
+        poly.vertices.emplace_back(x + width, y, 0.0);
+        poly.vertices.emplace_back(x + width, y + height, 0.0);
+        poly.vertices.emplace_back(x, y + height, 0.0);
+        return poly;
     }
-    return plot;
 }
 
 int main() {
-    auto rec = std::make_shared<rerun::RecordingStream>("farmtrax", "space");
-    if (rec->connect_grpc("rerun+http://0.0.0.0:9876/proxy").is_err()) {
-        std::cerr << "Failed to connect to rerun\n";
-        return 1;
-    }
-    rec->log("", rerun::Clear::RECURSIVE);
-    rec->log_with_static("", true, rerun::Clear::RECURSIVE);
+    const dp::Geo datum{51.73019, 4.23883, 0.0};
+    zoneout::Zone root("Farm", "root", rectangle(0.0, 0.0, 100.0, 100.0), datum, 1.0);
+    root.add_child(zoneout::Zone("Field A", "field", rectangle(10.0, 10.0, 30.0, 30.0), datum, 1.0));
 
-    // auto farm = create_field("Just_Field", "wheat", dp::Geo{51.73019, 4.23883, 0.0});
-    // farm.save("/home/bresilla/farm_plot");
-    auto farm = zoneout::Plot::load("/home/bresilla/farm_plot", "Just Farm", "wheat");
+    zoneout::Workspace workspace(root);
+    workspace.add_node(dp::Point{20.0, 20.0, 0.0}, {{"name", "start"}});
+    workspace.add_node(dp::Point{80.0, 80.0, 0.0}, {{"name", "end"}});
 
-    auto zones = farm.zones();
-    std::cout << "Num zones: " << zones.size() << std::endl;
+    const std::string save_path = "/tmp/zoneout_example_workspace";
+    workspace.save(save_path);
 
-    auto zone0 = zones.at(0);
-    auto boundary = zone0.poly().field_boundary();
-    std::cout << "Zone 0 boundary: " << boundary.vertices.size() << " points" << std::endl;
-
-    const auto &polygon_elements = zone0.poly().polygon_elements();
-    std::cout << "Number of polygon elements: " << polygon_elements.size() << std::endl;
-    std::cout << "Has field boundary: " << zone0.poly().has_field_boundary() << std::endl;
-
-    std::vector<dp::Polygon> obstacles;
-    if (!polygon_elements.empty()) {
-        auto obstacle = polygon_elements[0].geometry;
-        std::cout << "Zone 0 obstacle: " << obstacle.vertices.size() << " points" << std::endl;
-        obstacle.vertices.push_back(obstacle.vertices.front());
-        obstacles.push_back(obstacle);
-    }
-
+    std::cout << "Saved workspace to: " << save_path << std::endl;
+    std::cout << "Root zone: " << workspace.root_zone().name() << std::endl;
+    std::cout << "Child zones: " << workspace.root_zone().child_count() << std::endl;
+    std::cout << "Graph nodes: " << workspace.graph().vertex_count() << std::endl;
     return 0;
 }

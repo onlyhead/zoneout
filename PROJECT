@@ -24,6 +24,7 @@ zoneout
 [lib]
 datapod|https://github.com/robolibs/datapod.git|0.0.41
 optinum|https://github.com/robolibs/optinum.git|0.0.18
+graphix|https://github.com/robolibs/graphix.git|0.0.9
 concord|https://github.com/robolibs/concord.git|0.0.10
 vectkit|https://github.com/robolibs/vectkit.git|0.0.8
 rastkit|https://github.com/robolibs/rastkit.git|0.0.8

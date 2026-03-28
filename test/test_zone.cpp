@@ -39,7 +39,7 @@ TEST_CASE("Zone creation and basic properties") {
         CHECK(zone.name().empty());
         CHECK(zone.type() == "other");
         CHECK(!zone.poly().has_field_boundary());
-        CHECK(zone.raster_data().layers.size() == 1); // Zone now includes the base grid
+        CHECK(zone.plot().grid().raster().layers.size() == 1); // Zone now includes the base grid
     }
 
     SUBCASE("Named constructor") {
@@ -58,7 +58,7 @@ TEST_CASE("Zone creation and basic properties") {
         CHECK(zone.name() == "Test Zone");
         CHECK(zone.type() == "field");
         CHECK(!zone.poly().has_field_boundary());
-        CHECK(zone.raster_data().layers.size() == 1); // Zone now includes the base grid
+        CHECK(zone.plot().grid().raster().layers.size() == 1); // Zone now includes the base grid
     }
 
     SUBCASE("Constructor with boundary") {
@@ -90,7 +90,7 @@ TEST_CASE("Zone constructor with auto-generated grid") {
         CHECK(zone.name() == "Auto Grid Zone");
         CHECK(zone.type() == "field");
         CHECK(zone.poly().has_field_boundary());
-        CHECK(zone.grid().layer_count() == 1); // Should have the auto-generated base grid with noise
+        CHECK(zone.plot().grid().layer_count() == 1); // Should have the auto-generated base grid with noise
 
         // Check that grid dimensions are reasonable for the polygon size
         // For a 100x50 rectangle with resolution 1.0, we expect roughly 100x50 cells
@@ -106,7 +106,7 @@ TEST_CASE("Zone constructor with auto-generated grid") {
         CHECK(zone.name() == "Custom Resolution Zone");
         CHECK(zone.type() == "field");
         CHECK(zone.poly().has_field_boundary());
-        CHECK(zone.grid().layer_count() == 1);
+        CHECK(zone.plot().grid().layer_count() == 1);
 
         // With resolution 2.0, grid should have roughly half the cells in each dimension
         auto grid_info = zone.raster_info();
@@ -121,7 +121,7 @@ TEST_CASE("Zone constructor with auto-generated grid") {
         CHECK(zone.name() == "Fine Resolution Zone");
         CHECK(zone.type() == "field");
         CHECK(zone.poly().has_field_boundary());
-        CHECK(zone.grid().layer_count() == 1);
+        CHECK(zone.plot().grid().layer_count() == 1);
 
         // With resolution 0.5, grid should have more cells for the same area
         auto grid_info = zone.raster_info();
@@ -142,7 +142,7 @@ TEST_CASE("Zone constructor with auto-generated grid") {
         CHECK(zone.name() == "L-Shape Auto Grid");
         CHECK(zone.type() == "field");
         CHECK(zone.poly().has_field_boundary());
-        CHECK(zone.grid().layer_count() == 1);
+        CHECK(zone.plot().grid().layer_count() == 1);
 
         // Grid should be generated based on the OBB of the L-shape
         auto grid_info = zone.raster_info();
@@ -183,7 +183,7 @@ TEST_CASE("Zone poly_cut functionality") {
         // Add the grid with poly_cut=true - should zero out cells outside the L-shape
         zone.add_raster_layer(full_grid, "test_layer", "test", {}, true);
 
-        CHECK(zone.grid().layer_count() == 2); // Base grid + test layer
+        CHECK(zone.plot().grid().layer_count() == 2); // Base grid + test layer
     }
 
     SUBCASE("addRasterLayer with poly_cut=false (default)") {
@@ -210,7 +210,7 @@ TEST_CASE("Zone poly_cut functionality") {
         // Add without poly_cut - should preserve all values
         zone.add_raster_layer(test_grid, "no_cut_layer", "test");
 
-        CHECK(zone.grid().layer_count() == 2); // Base grid + no_cut_layer
+        CHECK(zone.plot().grid().layer_count() == 2); // Base grid + no_cut_layer
     }
 }
 
@@ -351,9 +351,9 @@ TEST_CASE("Zone raster layers") {
             }
         }
 
-        zone.grid().add_grid(elevation_grid, "elevation", "terrain");
+        zone.plot().grid().add_grid(elevation_grid, "elevation", "terrain");
 
-        CHECK(zone.raster_data().layers.size() == 2); // Base grid + elevation layer
+        CHECK(zone.plot().grid().raster().layers.size() == 2); // Base grid + elevation layer
     }
 }
 

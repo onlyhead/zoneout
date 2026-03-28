@@ -142,33 +142,29 @@ TEST_CASE("Zone raster layers management") {
     Zone zone("Raster Zone", "field", boundary, base_grid, WAGENINGEN_DATUM);
 
     SUBCASE("Add elevation layer") {
-        // Add elevation layer via zone.grid()
-        zone.grid().add_grid(20, 10, "elevation", "terrain", {{"units", "meters"}});
+        zone.plot().grid().add_grid(20, 10, "elevation", "terrain", {{"units", "meters"}});
 
-        CHECK(zone.grid().layer_count() == 2); // Base grid + elevation layer
+        CHECK(zone.plot().grid().layer_count() == 2); // Base grid + elevation layer
     }
 
     SUBCASE("Add soil moisture layer") {
-        // Add soil moisture layer via zone.grid()
-        zone.grid().add_grid(16, 8, "soil_moisture", "environmental", {{"units", "percentage"}});
+        zone.plot().grid().add_grid(16, 8, "soil_moisture", "environmental", {{"units", "percentage"}});
 
-        CHECK(zone.grid().layer_count() == 2); // Base grid + soil moisture layer
+        CHECK(zone.plot().grid().layer_count() == 2); // Base grid + soil moisture layer
     }
 
     SUBCASE("Add crop health layer") {
-        // Add crop health layer via zone.grid()
-        zone.grid().add_grid(24, 12, "crop_health", "vegetation", {{"units", "NDVI"}});
+        zone.plot().grid().add_grid(24, 12, "crop_health", "vegetation", {{"units", "NDVI"}});
 
-        CHECK(zone.grid().layer_count() == 2); // Base grid + crop health layer
+        CHECK(zone.plot().grid().layer_count() == 2); // Base grid + crop health layer
     }
 
     SUBCASE("Multiple raster layers") {
-        // Add all three types via zone.grid()
-        zone.grid().add_grid(20, 10, "elevation", "terrain", {{"units", "meters"}});
-        zone.grid().add_grid(20, 10, "soil_moisture", "environmental", {{"units", "percentage"}});
-        zone.grid().add_grid(20, 10, "crop_health", "vegetation", {{"units", "NDVI"}});
+        zone.plot().grid().add_grid(20, 10, "elevation", "terrain", {{"units", "meters"}});
+        zone.plot().grid().add_grid(20, 10, "soil_moisture", "environmental", {{"units", "percentage"}});
+        zone.plot().grid().add_grid(20, 10, "crop_health", "vegetation", {{"units", "NDVI"}});
 
-        CHECK(zone.grid().layer_count() == 4); // Base grid + 3 additional layers
+        CHECK(zone.plot().grid().layer_count() == 4); // Base grid + 3 additional layers
     }
 
     SUBCASE("Custom raster layer") {
@@ -177,9 +173,9 @@ TEST_CASE("Zone raster layers management") {
         props["measurement_date"] = "2024-06-15";
         props["weather_conditions"] = "sunny";
 
-        zone.grid().add_grid(10, 5, "temperature", "thermal", props);
+        zone.plot().grid().add_grid(10, 5, "temperature", "thermal", props);
 
-        CHECK(zone.grid().layer_count() == 2); // Base grid + temperature layer
+        CHECK(zone.plot().grid().layer_count() == 2); // Base grid + temperature layer
     }
 }
 
@@ -196,11 +192,10 @@ TEST_CASE("Zone raster sampling") {
     auto boundary = createRectangle(0, 0, 100, 50);
     Zone zone("Sampling Zone", "field", boundary, base_grid, WAGENINGEN_DATUM);
 
-    // Add elevation layer with known pattern via zone.grid()
-    zone.grid().add_grid(20, 10, "elevation", "terrain", {{"units", "meters"}});
+    zone.plot().grid().add_grid(20, 10, "elevation", "terrain", {{"units", "meters"}});
 
     // Get the layer and fill it with test data
-    auto &layer = zone.grid().get_layer(1); // Index 1 is the elevation layer (0 is base)
+    auto &layer = zone.plot().grid().get_layer(1); // Index 1 is the elevation layer (0 is base)
     auto &layer_grid = std::get<dp::Grid<uint8_t>>(layer.grid);
     for (size_t r = 0; r < layer_grid.rows; ++r) {
         for (size_t c = 0; c < layer_grid.cols; ++c) {
@@ -210,7 +205,7 @@ TEST_CASE("Zone raster sampling") {
 
     SUBCASE("Sample at specific points") {
         // Direct access to raster grid for sampling
-        const auto &elev_layer = zone.grid().get_layer(1);
+        const auto &elev_layer = zone.plot().grid().get_layer(1);
         const auto &elev_grid = std::get<dp::Grid<uint8_t>>(elev_layer.grid);
 
         // Sample at grid cell (2, 2) - should have value 100 + 2 + 2 = 104
@@ -223,7 +218,7 @@ TEST_CASE("Zone raster sampling") {
     }
 
     SUBCASE("Sample at grid corners") {
-        const auto &elev_layer = zone.grid().get_layer(1);
+        const auto &elev_layer = zone.plot().grid().get_layer(1);
         const auto &elev_grid = std::get<dp::Grid<uint8_t>>(elev_layer.grid);
 
         // Sample at corner (0, 0) - should have value 100 + 0 + 0 = 100
@@ -376,8 +371,7 @@ TEST_CASE("Zone file I/O operations") {
     auto boundary = createRectangle(0, 0, 100, 50);
     Zone zone("File I/O Zone", "field", boundary, base_grid, WAGENINGEN_DATUM);
 
-    // Add some data to make it interesting via zone.grid()
-    zone.grid().add_grid(10, 5, "elevation", "terrain", {{"units", "meters"}});
+    zone.plot().grid().add_grid(10, 5, "elevation", "terrain", {{"units", "meters"}});
 
     // Add field elements
     dp::Segment row_line({10, 25, 0}, {90, 25, 0});
@@ -388,10 +382,10 @@ TEST_CASE("Zone file I/O operations") {
         const std::string raster_path = "/tmp/zoneout_test_zone.tiff";
 
         // Save zone
-        zone.to_files(vector_path, raster_path);
+        zone.save_plot_files(vector_path, raster_path);
 
         // Load zone back
-        auto loaded_zone = Zone::from_files(vector_path, raster_path);
+        auto loaded_zone = Zone::load_plot_files(vector_path, raster_path);
 
         // Basic properties should be preserved
         CHECK(loaded_zone.name() == "File I/O Zone");

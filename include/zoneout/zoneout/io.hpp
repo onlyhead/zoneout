@@ -15,11 +15,11 @@ namespace zoneout {
         // Zone I/O functions
         inline void save_zone(const Zone &zone, const std::filesystem::path &vector_path,
                               const std::filesystem::path &raster_path) {
-            zone.to_files(vector_path, raster_path);
+            zone.save_plot_files(vector_path, raster_path);
         }
 
         inline Zone load_zone(const std::filesystem::path &vector_path, const std::filesystem::path &raster_path) {
-            return Zone::from_files(vector_path, raster_path);
+            return Zone::load_plot_files(vector_path, raster_path);
         }
 
         inline void save_zone(const Zone &zone, const std::filesystem::path &directory) { zone.save(directory); }

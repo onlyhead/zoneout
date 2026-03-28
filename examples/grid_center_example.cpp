@@ -32,7 +32,7 @@ int main() {
     zone.add_raster_layer(elevation, "elevation", "terrain");
 
     // Get the grid
-    auto &raster = zone.raster_data();
+    auto &raster = zone.plot().grid().raster();
     if (!raster.layers.empty()) {
         auto &grid_variant = raster.layers[0].grid;
 

@@ -1,5 +1,6 @@
 #include <iostream>
-#include <zoneout/zoneout.hpp>
+
+#include "zoneout/zoneout.hpp"
 
 #ifdef HAS_RERUN
 #include <rerun/recording_stream.hpp>
@@ -7,13 +8,21 @@
 
 namespace dp = datapod;
 
+namespace {
+    dp::Polygon rectangle(double x, double y, double width, double height) {
+        dp::Polygon poly;
+        poly.vertices.push_back({x, y, 0.0});
+        poly.vertices.push_back({x + width, y, 0.0});
+        poly.vertices.push_back({x + width, y + height, 0.0});
+        poly.vertices.push_back({x, y + height, 0.0});
+        return poly;
+    }
+} // namespace
+
 int main() {
     std::cout << "Zoneout Agricultural Visualization Example" << std::endl;
 
 #ifdef HAS_RERUN
-    std::cout << "Visualization enabled with Rerun SDK" << std::endl;
-
-    // Initialize Rerun connection
     auto rec = std::make_shared<rerun::RecordingStream>("zoneout_agricultural", "space");
     auto result = rec->connect_grpc("rerun+http://0.0.0.0:9876/proxy");
     if (result.is_err()) {
@@ -21,55 +30,42 @@ int main() {
         return 1;
     }
 
-    // Set up realistic agricultural coordinates
-    // Use Wageningen Research Labs (Netherlands) as reference - real agricultural research location
-    dp::Geo datum{51.98776171041831, 5.662378206146002, 0.0}; // Wageningen Research Labs
+    const dp::Geo datum{51.98776171041831, 5.662378206146002, 0.0};
 
-    // Create simple base grid for Zone constructor
-    dp::Pose shift{dp::Point{0.0, 0.0, 0.0}, dp::Quaternion{1.0, 0.0, 0.0, 0.0}};
-    dp::Grid<uint8_t> base_grid(10, 10, 1.0, true, shift, {});
+    zoneout::Zone farm("Wageningen_Farm", "root", rectangle(0.0, 0.0, 300.0, 200.0), datum);
+    zoneout::Zone wheat_field("Wheat_Field_North", "field", rectangle(0.0, 0.0, 300.0, 200.0), datum, 1.0);
 
-    // Create a realistic agricultural zone (wheat field)
-    dp::Polygon default_boundary;
-    zoneout::Zone wheat_field("Wheat_Field_North", "field", default_boundary, base_grid, datum);
-
-    // Create field boundary in local ENU coordinates (meters from datum)
-    dp::Polygon boundary;
-    boundary.vertices.push_back(dp::Point(0.0, 0.0, 0.0));     // SW corner
-    boundary.vertices.push_back(dp::Point(300.0, 0.0, 0.0));   // SE corner
-    boundary.vertices.push_back(dp::Point(300.0, 200.0, 0.0)); // NE corner
-    boundary.vertices.push_back(dp::Point(0.0, 200.0, 0.0));   // NW corner
-
-    wheat_field.poly().set_field_boundary(boundary);
     wheat_field.set_property("crop_type", "wheat");
     wheat_field.set_property("planting_date", "2024-10-15");
     wheat_field.set_property("area_hectares", "6.0");
 
-    std::cout << "Created zone: " << wheat_field.name() << " (" << wheat_field.type()
-              << "): " << wheat_field.poly().area() << " m²" << std::endl;
+    auto obstacle = rectangle(80.0, 60.0, 20.0, 15.0);
+    wheat_field.add_polygon_element(obstacle, "storage_pad", "obstacle");
+    farm.add_child(wheat_field);
 
-    // Visualize the zone
-    std::cout << "\nSending visualization data to Rerun..." << std::endl;
-    zoneout::visualize::show_zone(wheat_field, rec, datum, wheat_field.name(), 0);
+    zoneout::Workspace workspace(std::move(farm));
 
-    std::cout << "\n=== Visualization Ready ===" << std::endl;
-    std::cout << "Open your browser to: http://localhost:9876" << std::endl;
-    std::cout << "Or run: rerun &" << std::endl;
-    std::cout << "\nVisualization features:" << std::endl;
-    std::cout << "• Local ENU coordinates: /" << wheat_field.name() << "/enu (meters from datum)" << std::endl;
-    std::cout << "• GPS map coordinates: /" << wheat_field.name() << "/wgs (lat/lon on world map)" << std::endl;
-    std::cout << "\nMap view shows real GPS coordinates around Wageningen, Netherlands" << std::endl;
-    std::cout << "\nZone area: " << wheat_field.poly().area() / 10000.0 << " hectares" << std::endl;
-    std::cout << "Datum reference: " << datum.latitude << "°N, " << datum.longitude << "°E" << std::endl;
+    auto lane_start = workspace.add_node(dp::Point{20.0, 20.0, 0.0}, {{"kind", "entry"}});
+    auto lane_mid = workspace.add_node(dp::Point{140.0, 80.0, 0.0}, {{"kind", "turn"}}); 
+    auto lane_end = workspace.add_node(dp::Point{260.0, 160.0, 0.0}, {{"kind", "exit"}});
+    workspace.add_edge(lane_start, lane_mid, 1.0, graphix::vertex::EdgeType::Undirected, {{"kind", "lane"}});
+    workspace.add_edge(lane_mid, lane_end, 1.0, graphix::vertex::EdgeType::Undirected, {{"kind", "lane"}});
 
-    // Keep the program running to maintain the visualization
-    std::cout << "\nPress Enter to exit..." << std::endl;
+    std::cout << "Root zone: " << workspace.root_zone().name() << std::endl;
+    std::cout << "Field zones: " << workspace.root_zone().child_count() << std::endl;
+    std::cout << "Graph nodes: " << workspace.graph().vertex_count() << std::endl;
+
+    zoneout::visualize::show_zone(workspace.root_zone(), rec, datum, workspace.root_zone().name(), 0);
+    for (const auto &child : workspace.root_zone().children()) {
+        zoneout::visualize::show_zone(child, rec, datum, child.name(), 1);
+    }
+
+    std::cout << "Open http://localhost:9876" << std::endl;
+    std::cout << "Press Enter to exit..." << std::endl;
     std::cin.get();
 
 #else
-    std::cout << "Visualization disabled - build with ZONEOUT_BUILD_EXAMPLES=ON to enable" << std::endl;
-    std::cout << "This example demonstrates realistic agricultural zone coordinates and proper scale." << std::endl;
-    std::cout << "Zone is 6.0 hectares - typical field size." << std::endl;
+    std::cout << "Visualization disabled - build with HAS_RERUN" << std::endl;
 #endif
 
     return 0;
