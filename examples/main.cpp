@@ -1,8 +1,5 @@
 #include "zoneout/zoneout.hpp"
 
-#include "geoget/geoget.hpp"
-#include "rerun.hpp"
-#include "rerun/recording_stream.hpp"
 #include <entropy/generator.hpp>
 #include <iostream>
 #include <random>
@@ -83,32 +80,12 @@ zoneout::Plot create_field(const std::string &zone_name, const std::string &crop
 }
 
 int main() {
-
-    auto rec = std::make_shared<rerun::RecordingStream>("zoneout", "space");
-    if (rec->connect_grpc("rerun+http://127.0.0.1:9876/proxy").is_err()) {
-        std::cerr << "Failed to connect to rerun\n";
-        return 1;
-    }
-    rec->log("", rerun::Clear::RECURSIVE);
-    rec->log_with_static("", true, rerun::Clear::RECURSIVE);
-
-    // Try to load existing plot, or create a new one if it doesn't exist
     std::string plot_path = "/home/bresilla/farm_plot_2";
-    zoneout::Plot farm("Pea Farm", "agricultural", dp::Geo{51.73019, 4.23883, 0.0});
-
-    if (std::filesystem::exists(plot_path)) {
-        std::cout << "Loading existing plot from: " << plot_path << std::endl;
-        farm = zoneout::Plot::load(plot_path, "Pea Farm", "agricultural");
-    }
-
-    // If no zones were loaded, create a new field
-    if (farm.zone_count() == 0) {
-        std::cout << "No zones found, creating new field..." << std::endl;
-        farm = create_field("Pea_Field", "pea", dp::Geo{51.73019, 4.23883, 0.0});
-        if (farm.zone_count() > 0) {
-            std::cout << "Saving farm to: " << plot_path << std::endl;
-            farm.save(plot_path);
-        }
+    std::cout << "Opening geoget on http://localhost:8080" << std::endl;
+    auto farm = create_field("Pea_Field", "pea", dp::Geo{51.73019, 4.23883, 0.0});
+    if (farm.zone_count() > 0) {
+        std::cout << "Saving farm to: " << plot_path << std::endl;
+        farm.save(plot_path);
     }
 
     auto zones = farm.zones();
@@ -124,7 +101,9 @@ int main() {
     std::cout << "Zone 0 boundary: " << boundary.vertices.size() << " points" << std::endl;
 
     for (size_t i = 0; i < zones.size(); ++i) {
-        zoneout::visualize::show_zone(zones.at(i), rec, zones.at(i).datum(), zones.at(i).name(), i);
+        const auto &zone = zones.at(i);
+        std::cout << "Zone " << i << ": " << zone.name() << " with "
+                  << zone.poly().field_boundary().vertices.size() << " boundary points" << std::endl;
     }
 
     return 0;
