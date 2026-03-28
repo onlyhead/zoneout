@@ -168,6 +168,36 @@ workspace.save(directory);
 Workspace::load(directory);
 ```
 
+### Workspace JSON
+
+```cpp
+WorkspaceJson json = parse_workspace_json_file("workspace.json");
+auto errors = validate_workspace_json(json);
+if (!errors.empty()) {
+    // surface import errors to the UI
+}
+
+Workspace workspace = to_workspace(json);
+write_workspace_json_file("roundtrip.json", workspace);
+```
+
+Public draft/import APIs:
+
+- `WorkspaceJson`
+- `ZoneJson`
+- `NodeJson`
+- `EdgeJson`
+- `parse_workspace_json(...)`
+- `parse_workspace_json_file(...)`
+- `workspace_json(...)`
+- `write_workspace_json_file(path, draft)`
+- `write_workspace_json_file(path, workspace)`
+- `validate_workspace_json(...)`
+- `require_valid_workspace_json(...)`
+- `to_workspace(...)`
+- `from_workspace(...)`
+- `load_workspace_json_file(...)`
+
 ## Persistence
 
 `Workspace::save()` writes:
@@ -185,6 +215,9 @@ workspace/
 ```
 
 `Workspace::load()` still supports the older temporary layout for compatibility.
+
+The separate UI tool should use `workspace.json` as the interchange format.
+That interchange JSON is intentionally separate from the native `Workspace::save()` directory layout.
 
 ## Examples
 

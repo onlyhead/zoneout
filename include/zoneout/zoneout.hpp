@@ -12,5 +12,6 @@
 #include "zoneout/zoneout/polygrid.hpp"
 #include "zoneout/zoneout/utils/time.hpp"
 #include "zoneout/zoneout/utils/uuid.hpp"
+#include "zoneout/zoneout/wire.hpp"
 #include "zoneout/zoneout/workspace.hpp"
 #include "zoneout/zoneout/zone.hpp"

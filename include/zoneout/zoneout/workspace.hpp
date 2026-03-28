@@ -686,3 +686,5 @@ namespace zoneout {
     };
 
 } // namespace zoneout
+
+#include "wire.hpp"
