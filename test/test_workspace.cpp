@@ -410,7 +410,41 @@ TEST_CASE("Workspace JSON validation catches malformed ids and coordinates") {
     CHECK(std::find_if(errors.begin(), errors.end(),
                        [](const std::string &error) { return error.find("does not match zone.id") != std::string::npos; }) != errors.end());
     CHECK(std::find_if(errors.begin(), errors.end(),
-                       [](const std::string &error) { return error.find("invalid latitude/longitude") != std::string::npos; }) != errors.end());
+                       [](const std::string &error) { return error.find("invalid coordinates") != std::string::npos; }) != errors.end());
     CHECK(std::find_if(errors.begin(), errors.end(),
                        [](const std::string &error) { return error.find("non-finite weight") != std::string::npos; }) != errors.end());
+}
+
+TEST_CASE("Workspace JSON local coord_mode imports x/y coordinates using ref") {
+    WorkspaceJson draft;
+    draft.coord_mode = CoordMode::Local;
+    draft.ref = JsonPoint{52.0, 5.0};
+    draft.ref_set = true;
+
+    ZoneJson root_zone;
+    root_zone.polygon_latlon = {
+        JsonPoint{0.0, 0.0},
+        JsonPoint{0.0, 100.0},
+        JsonPoint{100.0, 100.0},
+        JsonPoint{100.0, 0.0},
+    };
+
+    draft.root_zone_id = root_zone.id;
+    draft.zones[root_zone.id] = root_zone;
+
+    NodeJson node;
+    node.latlon = JsonPoint{25.0, 30.0};
+    draft.nodes[node.id] = node;
+
+    auto workspace = to_workspace(draft);
+
+    REQUIRE(workspace.graph().vertex_count() == 1);
+    const auto vertex_id = *workspace.graph().vertices().begin();
+    CHECK(workspace.graph()[vertex_id].position.x == doctest::Approx(30.0));
+    CHECK(workspace.graph()[vertex_id].position.y == doctest::Approx(25.0));
+
+    const auto json_text = workspace_json(draft);
+    CHECK(json_text.find("\"coord_mode\":\"local\"") != std::string::npos);
+    CHECK(json_text.find("\"x\":30") != std::string::npos);
+    CHECK(json_text.find("\"y\":25") != std::string::npos);
 }

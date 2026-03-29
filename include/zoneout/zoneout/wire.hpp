@@ -31,6 +31,7 @@ namespace zoneout {
         std::string type = "zone";
         std::string parent_id;
         std::vector<std::string> child_ids;
+        std::vector<std::string> node_ids;
         std::unordered_map<std::string, std::string> properties;
         std::vector<JsonPoint> polygon_latlon;
         bool grid_enabled = false;
@@ -60,6 +61,9 @@ namespace zoneout {
         std::unordered_map<std::string, ZoneJson> zones;
         std::unordered_map<std::string, NodeJson> nodes;
         std::unordered_map<std::string, EdgeJson> edges;
+        CoordMode coord_mode = CoordMode::Global;
+        JsonPoint ref{};
+        bool ref_set = false;
         dp::Geo datum;
         bool datum_set = false;
         std::string name = "Workspace";
@@ -200,10 +204,22 @@ namespace zoneout {
             return out;
         }
 
-        inline JsonPoint parse_point(json_value_s *value) {
+        inline std::string parse_coord_mode(json_value_s *value) { return draft_get_string(value, "global"); }
+
+        inline std::string serialize_coord_mode(CoordMode mode) {
+            return mode == CoordMode::Local ? "local" : "global";
+        }
+
+        inline JsonPoint parse_point(json_value_s *value, CoordMode mode) {
             auto *obj = draft_json_object(value);
             if (!obj) {
                 return {};
+            }
+            if (mode == CoordMode::Local) {
+                auto *x_elem = draft_find_element(obj, "x");
+                auto *y_elem = draft_find_element(obj, "y");
+                return {draft_get_number(y_elem ? y_elem->value : nullptr),
+                        draft_get_number(x_elem ? x_elem->value : nullptr)};
             }
             auto *lat_elem = draft_find_element(obj, "lat");
             auto *lon_elem = draft_find_element(obj, "lon");
@@ -211,14 +227,14 @@ namespace zoneout {
                     draft_get_number(lon_elem ? lon_elem->value : nullptr)};
         }
 
-        inline std::vector<JsonPoint> parse_polygon(json_value_s *value) {
+        inline std::vector<JsonPoint> parse_polygon(json_value_s *value, CoordMode mode) {
             std::vector<JsonPoint> polygon;
             auto *arr = draft_json_array(value);
             if (!arr) {
                 return polygon;
             }
             for (auto *elem = arr->start; elem; elem = elem->next) {
-                polygon.push_back(parse_point(elem->value));
+                polygon.push_back(parse_point(elem->value, mode));
             }
             return polygon;
         }
@@ -251,14 +267,24 @@ namespace zoneout {
             return out.str();
         }
 
-        inline std::string serialize_polygon(const std::vector<JsonPoint> &polygon) {
+        inline std::string serialize_point(const JsonPoint &point, CoordMode mode) {
+            std::ostringstream out;
+            if (mode == CoordMode::Local) {
+                out << "{\"x\":" << point.lon << ",\"y\":" << point.lat << "}";
+            } else {
+                out << "{\"lat\":" << point.lat << ",\"lon\":" << point.lon << "}";
+            }
+            return out.str();
+        }
+
+        inline std::string serialize_polygon(const std::vector<JsonPoint> &polygon, CoordMode mode) {
             std::ostringstream out;
             out << "[";
             for (size_t i = 0; i < polygon.size(); ++i) {
                 if (i > 0) {
                     out << ",";
                 }
-                out << "{\"lat\":" << polygon[i].lat << ",\"lon\":" << polygon[i].lon << "}";
+                out << serialize_point(polygon[i], mode);
             }
             out << "]";
             return out.str();
@@ -286,6 +312,10 @@ namespace zoneout {
                    point.lon >= -180.0 && point.lon <= 180.0;
         }
 
+        inline bool valid_local_xy(const JsonPoint &point) {
+            return std::isfinite(point.lat) && std::isfinite(point.lon);
+        }
+
         inline size_t unique_point_count(const std::vector<JsonPoint> &polygon) {
             std::unordered_set<std::string> unique;
             unique.reserve(polygon.size());
@@ -298,6 +328,9 @@ namespace zoneout {
         }
 
         inline dp::Geo infer_datum(const WorkspaceJson &json) {
+            if (json.ref_set) {
+                return {json.ref.lat, json.ref.lon, 0.0};
+            }
             if (json.datum_set) {
                 return json.datum;
             }
@@ -314,35 +347,46 @@ namespace zoneout {
                 return {node.latlon.lat, node.latlon.lon, 0.0};
             }
 
+            if (json.coord_mode == CoordMode::Local) {
+                throw std::runtime_error("Cannot infer workspace datum for local coordinates without a ref point");
+            }
             throw std::runtime_error("Cannot infer workspace datum from empty draft");
         }
 
-        inline dp::Point to_local_point(const JsonPoint &point, const dp::Geo &datum) {
+        inline dp::Point to_local_point(const JsonPoint &point, const dp::Geo &datum, CoordMode mode) {
+            if (mode == CoordMode::Local) {
+                return {point.lon, point.lat, 0.0};
+            }
             concord::earth::WGS wgs{point.lat, point.lon, 0.0};
             const auto enu = concord::frame::to_enu(datum, wgs);
             return {enu.east(), enu.north(), enu.up()};
         }
 
-        inline JsonPoint to_json_point(const dp::Point &point, const dp::Geo &datum) {
+        inline JsonPoint to_json_point(const dp::Point &point, const dp::Geo &datum, CoordMode mode) {
+            if (mode == CoordMode::Local) {
+                return {point.y, point.x};
+            }
             const concord::frame::ENU enu{point.x, point.y, point.z, datum};
             const auto wgs = concord::frame::to_wgs(enu);
             return {wgs.latitude, wgs.longitude};
         }
 
-        inline dp::Polygon to_local_polygon(const std::vector<JsonPoint> &polygon, const dp::Geo &datum) {
+        inline dp::Polygon to_local_polygon(const std::vector<JsonPoint> &polygon, const dp::Geo &datum,
+                                            CoordMode mode) {
             dp::Polygon out;
             out.vertices.reserve(polygon.size());
             for (const auto &point : polygon) {
-                out.vertices.push_back(to_local_point(point, datum));
+                out.vertices.push_back(to_local_point(point, datum, mode));
             }
             return out;
         }
 
-        inline std::vector<JsonPoint> to_json_polygon(const dp::Polygon &polygon, const dp::Geo &datum) {
+        inline std::vector<JsonPoint> to_json_polygon(const dp::Polygon &polygon, const dp::Geo &datum,
+                                                      CoordMode mode) {
             std::vector<JsonPoint> out;
             out.reserve(polygon.vertices.size());
             for (const auto &point : polygon.vertices) {
-                out.push_back(to_json_point(point, datum));
+                out.push_back(to_json_point(point, datum, mode));
             }
             if (out.size() > 1 && out.front().lat == out.back().lat && out.front().lon == out.back().lon) {
                 out.pop_back();
@@ -392,7 +436,7 @@ namespace zoneout {
 
             visiting[zone_id] = true;
 
-            const auto boundary = to_local_polygon(draft_zone.polygon_latlon, datum);
+            const auto boundary = to_local_polygon(draft_zone.polygon_latlon, datum, json.coord_mode);
             const double resolution = draft_zone.grid_resolution > 0.0 ? draft_zone.grid_resolution : 1.0;
             Plot plot = draft_zone.grid_enabled ? Plot(draft_zone.name, draft_zone.type, boundary, datum, resolution)
                                                 : Plot(draft_zone.name, draft_zone.type, boundary, datum);
@@ -423,7 +467,7 @@ namespace zoneout {
             out_zone.type = zone.type();
             out_zone.parent_id = parent_id;
             out_zone.properties = zone.properties();
-            out_zone.polygon_latlon = to_json_polygon(zone.plot().poly().field_boundary(), datum);
+            out_zone.polygon_latlon = to_json_polygon(zone.plot().poly().field_boundary(), datum, json.coord_mode);
             out_zone.grid_enabled = zone.plot().has_grid();
             out_zone.grid_resolution = zone.plot().has_grid() ? zone.plot().grid().resolution() : 1.0;
             out_zone.child_ids.clear();
@@ -450,6 +494,10 @@ namespace zoneout {
         }
 
         WorkspaceJson json;
+        if (auto *coord_mode_elem = detail::draft_find_element(root_obj, "coord_mode")) {
+            json.coord_mode =
+                detail::parse_coord_mode(coord_mode_elem->value) == "local" ? CoordMode::Local : CoordMode::Global;
+        }
         if (auto *name_elem = detail::draft_find_element(root_obj, "name")) {
             json.name = detail::draft_get_string(name_elem->value, json.name);
         }
@@ -457,9 +505,13 @@ namespace zoneout {
             json.root_zone_id = detail::draft_get_string(root_zone_elem->value);
         }
         if (auto *datum_elem = detail::draft_find_element(root_obj, "datum")) {
-            auto datum_point = detail::parse_point(datum_elem->value);
+            auto datum_point = detail::parse_point(datum_elem->value, CoordMode::Global);
             json.datum = {datum_point.lat, datum_point.lon, 0.0};
             json.datum_set = true;
+        }
+        if (auto *ref_elem = detail::draft_find_element(root_obj, "ref")) {
+            json.ref = detail::parse_point(ref_elem->value, CoordMode::Global);
+            json.ref_set = true;
         }
 
         if (auto *zones_elem = detail::draft_find_element(root_obj, "zones")) {
@@ -491,6 +543,10 @@ namespace zoneout {
                         detail::parse_string_array(detail::draft_find_element(zone_obj, "child_ids")
                                                        ? detail::draft_find_element(zone_obj, "child_ids")->value
                                                        : nullptr);
+                    zone.node_ids =
+                        detail::parse_string_array(detail::draft_find_element(zone_obj, "node_ids")
+                                                       ? detail::draft_find_element(zone_obj, "node_ids")->value
+                                                       : nullptr);
                     zone.properties =
                         detail::parse_properties(detail::draft_find_element(zone_obj, "properties")
                                                      ? detail::draft_find_element(zone_obj, "properties")->value
@@ -498,7 +554,8 @@ namespace zoneout {
                     zone.polygon_latlon =
                         detail::parse_polygon(detail::draft_find_element(zone_obj, "polygon_latlon")
                                                   ? detail::draft_find_element(zone_obj, "polygon_latlon")->value
-                                                  : nullptr);
+                                                  : nullptr,
+                                              json.coord_mode);
                     zone.grid_enabled =
                         detail::draft_get_bool(detail::draft_find_element(zone_obj, "grid_enabled")
                                                    ? detail::draft_find_element(zone_obj, "grid_enabled")->value
@@ -532,7 +589,8 @@ namespace zoneout {
                                                          node.name);
                     node.latlon = detail::parse_point(detail::draft_find_element(node_obj, "latlon")
                                                           ? detail::draft_find_element(node_obj, "latlon")->value
-                                                          : nullptr);
+                                                          : nullptr,
+                                                      json.coord_mode);
                     node.zone_ids =
                         detail::parse_string_array(detail::draft_find_element(node_obj, "zone_ids")
                                                        ? detail::draft_find_element(node_obj, "zone_ids")->value
@@ -604,10 +662,18 @@ namespace zoneout {
         std::ostringstream out;
         out << "{";
         out << "\"name\":\"" << detail::draft_escape_json(json.name) << "\",";
+        out << "\"coord_mode\":\"" << detail::serialize_coord_mode(json.coord_mode) << "\",";
         out << "\"root_zone_id\":\"" << detail::draft_escape_json(json.root_zone_id) << "\",";
+        out << "\"ref\":";
+        if (json.ref_set) {
+            out << detail::serialize_point(json.ref, CoordMode::Global) << ",";
+        } else {
+            out << "null,";
+        }
         out << "\"datum\":";
         if (json.datum_set) {
-            out << "{\"lat\":" << json.datum.latitude << ",\"lon\":" << json.datum.longitude << "},";
+            out << detail::serialize_point(JsonPoint{json.datum.latitude, json.datum.longitude}, CoordMode::Global)
+                << ",";
         } else {
             out << "null,";
         }
@@ -625,8 +691,9 @@ namespace zoneout {
             out << "\"type\":\"" << detail::draft_escape_json(zone.type) << "\",";
             out << "\"parent_id\":\"" << detail::draft_escape_json(zone.parent_id) << "\",";
             out << "\"child_ids\":" << detail::serialize_string_array(zone.child_ids) << ",";
+            out << "\"node_ids\":" << detail::serialize_string_array(zone.node_ids) << ",";
             out << "\"properties\":" << detail::serialize_properties(zone.properties) << ",";
-            out << "\"polygon_latlon\":" << detail::serialize_polygon(zone.polygon_latlon) << ",";
+            out << "\"polygon_latlon\":" << detail::serialize_polygon(zone.polygon_latlon, json.coord_mode) << ",";
             out << "\"grid_enabled\":" << (zone.grid_enabled ? "true" : "false") << ",";
             out << "\"grid_resolution\":" << zone.grid_resolution;
             out << "}";
@@ -643,7 +710,7 @@ namespace zoneout {
             out << "\"" << detail::draft_escape_json(id) << "\":{";
             out << "\"id\":\"" << detail::draft_escape_json(node.id) << "\",";
             out << "\"name\":\"" << detail::draft_escape_json(node.name) << "\",";
-            out << "\"latlon\":{\"lat\":" << node.latlon.lat << ",\"lon\":" << node.latlon.lon << "},";
+            out << "\"latlon\":" << detail::serialize_point(node.latlon, json.coord_mode) << ",";
             out << "\"zone_ids\":" << detail::serialize_string_array(node.zone_ids) << ",";
             out << "\"properties\":" << detail::serialize_properties(node.properties);
             out << "}";
@@ -694,6 +761,12 @@ namespace zoneout {
                 errors.push_back("Workspace JSON datum is not a valid latitude/longitude");
             }
         }
+        if (json.ref_set && !detail::valid_latlon(json.ref)) {
+            errors.push_back("Workspace JSON ref is not a valid latitude/longitude");
+        }
+        if (json.coord_mode == CoordMode::Local && !json.ref_set && !json.datum_set) {
+            errors.push_back("Workspace JSON with local coord_mode requires a ref or datum");
+        }
 
         std::string inferred_root_id;
         try {
@@ -729,8 +802,9 @@ namespace zoneout {
                 errors.push_back("Zone '" + id + "' must contain at least 3 unique polygon vertices");
             }
             for (const auto &point : zone.polygon_latlon) {
-                if (!detail::valid_latlon(point)) {
-                    errors.push_back("Zone '" + id + "' contains an invalid latitude/longitude vertex");
+                if (!(json.coord_mode == CoordMode::Local ? detail::valid_local_xy(point)
+                                                          : detail::valid_latlon(point))) {
+                    errors.push_back("Zone '" + id + "' contains an invalid coordinate vertex");
                     break;
                 }
             }
@@ -772,6 +846,16 @@ namespace zoneout {
                                      "' but is missing from that parent's child_ids");
                 }
             }
+            for (const auto &node_id : zone.node_ids) {
+                try {
+                    detail::parse_uuid(node_id, "zone node");
+                } catch (const std::exception &e) {
+                    errors.push_back(e.what());
+                }
+                if (!json.nodes.contains(node_id)) {
+                    errors.push_back("Zone '" + id + "' references missing node '" + node_id + "'");
+                }
+            }
         }
 
         for (const auto &[id, node] : json.nodes) {
@@ -783,8 +867,9 @@ namespace zoneout {
             } catch (const std::exception &e) {
                 errors.push_back(e.what());
             }
-            if (!detail::valid_latlon(node.latlon)) {
-                errors.push_back("Node '" + id + "' has invalid latitude/longitude");
+            if (!(json.coord_mode == CoordMode::Local ? detail::valid_local_xy(node.latlon)
+                                                      : detail::valid_latlon(node.latlon))) {
+                errors.push_back("Node '" + id + "' has invalid coordinates");
             }
             for (const auto &zone_id : node.zone_ids) {
                 try {
@@ -882,11 +967,15 @@ namespace zoneout {
         }
 
         Workspace workspace(std::move(root_zone), Graph{});
+        workspace.set_coord_mode(json.coord_mode);
+        if (json.ref_set) {
+            workspace.set_ref(dp::Geo{json.ref.lat, json.ref.lon, 0.0});
+        }
         std::unordered_map<std::string, Graph::VertexId> node_map;
 
         for (const auto &[id, draft_node] : json.nodes) {
-            NodeData node(detail::parse_uuid(draft_node.id, "node"), detail::to_local_point(draft_node.latlon, datum),
-                          draft_node.properties);
+            NodeData node(detail::parse_uuid(draft_node.id, "node"),
+                          detail::to_local_point(draft_node.latlon, datum, json.coord_mode), draft_node.properties);
             auto vertex_id = workspace.graph().add_vertex(node);
 
             auto computed_zone_ids = workspace.zones_containing(node.position);
@@ -939,6 +1028,19 @@ namespace zoneout {
             }
         }
 
+        workspace.refresh_zone_node_membership();
+        for (const auto &[zone_id, draft_zone] : json.zones) {
+            if (auto *zone = workspace.find_zone(detail::parse_uuid(zone_id, "zone"))) {
+                std::vector<UUID> imported_node_ids;
+                for (const auto &node_id : draft_zone.node_ids) {
+                    imported_node_ids.push_back(detail::parse_uuid(node_id, "zone node"));
+                }
+                if (!imported_node_ids.empty()) {
+                    zone->set_node_ids(imported_node_ids);
+                }
+            }
+        }
+
         return workspace;
     }
 
@@ -949,9 +1051,17 @@ namespace zoneout {
     inline WorkspaceJson from_workspace(const Workspace &workspace) {
         WorkspaceJson json;
         json.name = "Workspace";
+        json.coord_mode = workspace.coord_mode();
         json.root_zone_id = workspace.root_zone().id().toString();
         json.datum = workspace.root_zone().plot().datum();
         json.datum_set = workspace.root_zone().plot().datum().is_set();
+        if (workspace.has_ref()) {
+            json.ref = JsonPoint{workspace.ref().latitude, workspace.ref().longitude};
+            json.ref_set = true;
+        } else if (json.datum_set) {
+            json.ref = JsonPoint{json.datum.latitude, json.datum.longitude};
+            json.ref_set = true;
+        }
 
         detail::append_zone_to_json(json, workspace.root_zone(), "", json.datum);
 
@@ -960,7 +1070,7 @@ namespace zoneout {
             NodeJson out_node;
             out_node.id = node.id.toString();
             out_node.name = node.properties.count("name") ? node.properties.at("name") : "Node";
-            out_node.latlon = detail::to_json_point(node.position, json.datum);
+            out_node.latlon = detail::to_json_point(node.position, json.datum, json.coord_mode);
             out_node.properties = node.properties;
             out_node.zone_ids.clear();
             for (const auto &zone_id : node.zone_ids) {
@@ -983,6 +1093,15 @@ namespace zoneout {
                 out_edge.zone_ids.push_back(zone_id.toString());
             }
             json.edges[out_edge.id] = out_edge;
+        }
+
+        for (auto &[zone_id, zone] : json.zones) {
+            zone.node_ids.clear();
+            if (const auto *workspace_zone = workspace.find_zone(UUID(zone_id))) {
+                for (const auto &node_id : workspace_zone->node_ids()) {
+                    zone.node_ids.push_back(node_id.toString());
+                }
+            }
         }
 
         return json;

@@ -45,6 +45,7 @@ namespace zoneout {
         std::string type_;
 
         std::unordered_map<std::string, std::string> properties_;
+        std::vector<UUID> node_ids_;
         std::vector<Zone> children_;
 
         struct JsonDeleter {
@@ -148,6 +149,32 @@ namespace zoneout {
             out << "}";
         }
 
+        inline static void write_uuid_array_json(std::ostream &out, const std::vector<UUID> &ids) {
+            out << "[";
+            for (size_t i = 0; i < ids.size(); ++i) {
+                if (i > 0) {
+                    out << ",";
+                }
+                out << "\"" << ids[i].toString() << "\"";
+            }
+            out << "]";
+        }
+
+        inline static std::vector<UUID> parse_uuid_array(json_value_s *value) {
+            std::vector<UUID> ids;
+            if (!value || value->type != json_type_array) {
+                return ids;
+            }
+            auto *arr = static_cast<json_array_s *>(value->payload);
+            for (auto *elem = arr->start; elem; elem = elem->next) {
+                auto parsed = parse_string(elem->value);
+                if (!parsed.empty()) {
+                    ids.emplace_back(parsed);
+                }
+            }
+            return ids;
+        }
+
         inline void save_metadata(const std::filesystem::path &directory) const {
             save_metadata_file(directory / "zone.json");
         }
@@ -170,6 +197,8 @@ namespace zoneout {
             out << "\"type\":\"" << escape_json(type_) << "\",";
             out << "\"properties\":";
             write_properties_json(out, properties_);
+            out << ",\"node_ids\":";
+            write_uuid_array_json(out, node_ids_);
             out << "}";
         }
 
@@ -212,6 +241,9 @@ namespace zoneout {
             }
             if (auto *props_elem = find_element(root_obj, "properties")) {
                 properties_ = parse_properties(props_elem->value);
+            }
+            if (auto *node_ids_elem = find_element(root_obj, "node_ids")) {
+                node_ids_ = parse_uuid_array(node_ids_elem->value);
             }
 
             sync_to_plot();
@@ -296,6 +328,8 @@ namespace zoneout {
         }
 
         inline const std::unordered_map<std::string, std::string> &properties() const { return properties_; }
+        inline const std::vector<UUID> &node_ids() const { return node_ids_; }
+        inline std::vector<UUID> &node_ids() { return node_ids_; }
         inline const std::vector<Zone> &children() const { return children_; }
         inline std::vector<Zone> &children() { return children_; }
         inline size_t child_count() const { return children_.size(); }
@@ -433,6 +467,8 @@ namespace zoneout {
 
         /// Check if a property exists
         inline bool has_property(const std::string &key) const { return properties_.find(key) != properties_.end(); }
+        inline void set_node_ids(const std::vector<UUID> &node_ids) { node_ids_ = node_ids; }
+        inline void clear_node_ids() { node_ids_.clear(); }
 
         inline const dp::Geo &datum() const { return plot_data_.datum(); }
 
