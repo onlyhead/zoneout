@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -20,7 +22,8 @@
 #include <vectkit/vectkit.hpp>
 
 #include "constants.hpp"
-#include "polygrid.hpp"
+#include "json.hpp"
+#include "plot.hpp"
 #include "utils/meta.hpp"
 #include "utils/time.hpp"
 #include "utils/uuid.hpp"
@@ -35,96 +38,284 @@ namespace zoneout {
 
     class Zone {
       private:
-        Poly poly_data_;
-        Grid grid_data_;
+        Plot plot_data_;
 
         UUID id_;
         std::string name_;
         std::string type_;
 
         std::unordered_map<std::string, std::string> properties_;
+        std::vector<UUID> node_ids_;
+        std::vector<Zone> children_;
+
+        struct JsonDeleter {
+            void operator()(json_value_s *ptr) const {
+                if (ptr) {
+                    free(ptr);
+                }
+            }
+        };
+
+        using JsonPtr = std::unique_ptr<json_value_s, JsonDeleter>;
+
+        inline static json_object_s *json_object(json_value_s *value) {
+            if (!value || value->type != json_type_object) {
+                return nullptr;
+            }
+            return static_cast<json_object_s *>(value->payload);
+        }
+
+        inline static json_string_s *json_string(json_value_s *value) {
+            if (!value || value->type != json_type_string) {
+                return nullptr;
+            }
+            return static_cast<json_string_s *>(value->payload);
+        }
+
+        inline static json_object_element_s *find_element(json_object_s *obj, const char *key) {
+            if (!obj) {
+                return nullptr;
+            }
+            for (auto *elem = obj->start; elem; elem = elem->next) {
+                if (elem->name && std::string(elem->name->string, elem->name->string_size) == key) {
+                    return elem;
+                }
+            }
+            return nullptr;
+        }
+
+        inline static std::string parse_string(json_value_s *value, const std::string &fallback = "") {
+            auto *str = json_string(value);
+            if (!str) {
+                return fallback;
+            }
+            return std::string(str->string, str->string_size);
+        }
+
+        inline static std::unordered_map<std::string, std::string> parse_properties(json_value_s *value) {
+            std::unordered_map<std::string, std::string> properties;
+            auto *obj = json_object(value);
+            if (!obj) {
+                return properties;
+            }
+            for (auto *elem = obj->start; elem; elem = elem->next) {
+                if (!elem->name) {
+                    continue;
+                }
+                properties[std::string(elem->name->string, elem->name->string_size)] = parse_string(elem->value);
+            }
+            return properties;
+        }
+
+        inline static std::string escape_json(const std::string &value) {
+            std::string escaped;
+            escaped.reserve(value.size() + 8);
+            for (char c : value) {
+                switch (c) {
+                case '\\':
+                    escaped += "\\\\";
+                    break;
+                case '"':
+                    escaped += "\\\"";
+                    break;
+                case '\n':
+                    escaped += "\\n";
+                    break;
+                case '\r':
+                    escaped += "\\r";
+                    break;
+                case '\t':
+                    escaped += "\\t";
+                    break;
+                default:
+                    escaped += c;
+                    break;
+                }
+            }
+            return escaped;
+        }
+
+        inline static void write_properties_json(std::ostream &out,
+                                                 const std::unordered_map<std::string, std::string> &properties) {
+            out << "{";
+            bool first = true;
+            for (const auto &[key, value] : properties) {
+                if (!first) {
+                    out << ",";
+                }
+                first = false;
+                out << "\"" << escape_json(key) << "\":\"" << escape_json(value) << "\"";
+            }
+            out << "}";
+        }
+
+        inline static void write_uuid_array_json(std::ostream &out, const std::vector<UUID> &ids) {
+            out << "[";
+            for (size_t i = 0; i < ids.size(); ++i) {
+                if (i > 0) {
+                    out << ",";
+                }
+                out << "\"" << ids[i].toString() << "\"";
+            }
+            out << "]";
+        }
+
+        inline static std::vector<UUID> parse_uuid_array(json_value_s *value) {
+            std::vector<UUID> ids;
+            if (!value || value->type != json_type_array) {
+                return ids;
+            }
+            auto *arr = static_cast<json_array_s *>(value->payload);
+            for (auto *elem = arr->start; elem; elem = elem->next) {
+                auto parsed = parse_string(elem->value);
+                if (!parsed.empty()) {
+                    ids.emplace_back(parsed);
+                }
+            }
+            return ids;
+        }
+
+        inline void save_metadata(const std::filesystem::path &directory) const {
+            save_metadata_file(directory / "zone.json");
+        }
+
+        inline static std::filesystem::path metadata_path_for(const std::filesystem::path &vector_path) {
+            auto metadata_path = vector_path;
+            metadata_path += ".zone.json";
+            return metadata_path;
+        }
+
+        inline void save_metadata_file(const std::filesystem::path &metadata_path) const {
+            std::ofstream out(metadata_path);
+            if (!out.is_open()) {
+                throw std::runtime_error("Failed to open zone metadata file for writing: " + metadata_path.string());
+            }
+
+            out << "{";
+            out << "\"id\":\"" << id_.toString() << "\",";
+            out << "\"name\":\"" << escape_json(name_) << "\",";
+            out << "\"type\":\"" << escape_json(type_) << "\",";
+            out << "\"properties\":";
+            write_properties_json(out, properties_);
+            out << ",\"node_ids\":";
+            write_uuid_array_json(out, node_ids_);
+            out << "}";
+        }
+
+        inline void load_metadata(const std::filesystem::path &directory) {
+            load_metadata_file(directory / "zone.json");
+        }
+
+        inline void load_metadata_file(const std::filesystem::path &metadata_path) {
+            if (!std::filesystem::exists(metadata_path)) {
+                return;
+            }
+
+            std::ifstream in(metadata_path);
+            if (!in.is_open()) {
+                throw std::runtime_error("Failed to open zone metadata file: " + metadata_path.string());
+            }
+
+            std::stringstream buffer;
+            buffer << in.rdbuf();
+            const auto json_text = buffer.str();
+
+            JsonPtr root(json_parse(json_text.c_str(), json_text.size()));
+            if (!root) {
+                throw std::runtime_error("Failed to parse zone metadata JSON: " + metadata_path.string());
+            }
+
+            auto *root_obj = json_object(root.get());
+            if (!root_obj) {
+                throw std::runtime_error("Invalid zone metadata JSON object: " + metadata_path.string());
+            }
+
+            if (auto *id_elem = find_element(root_obj, "id")) {
+                id_ = UUID(parse_string(id_elem->value));
+            }
+            if (auto *name_elem = find_element(root_obj, "name")) {
+                name_ = parse_string(name_elem->value);
+            }
+            if (auto *type_elem = find_element(root_obj, "type")) {
+                type_ = parse_string(type_elem->value);
+            }
+            if (auto *props_elem = find_element(root_obj, "properties")) {
+                properties_ = parse_properties(props_elem->value);
+            }
+            if (auto *node_ids_elem = find_element(root_obj, "node_ids")) {
+                node_ids_ = parse_uuid_array(node_ids_elem->value);
+            }
+
+            sync_to_plot();
+        }
+
+        inline void ensure_grid_initialized(const dp::Grid<uint8_t> &seed_grid) {
+            if (plot_data_.has_grid()) {
+                return;
+            }
+
+            Grid grid(name_, type_, "default");
+            grid.set_id(id_);
+            grid.datum() = plot_data_.datum();
+            grid.shift() = seed_grid.pose;
+            grid.resolution() = seed_grid.resolution;
+            plot_data_.set_grid(std::move(grid));
+        }
+
+        inline Grid &require_grid() {
+            if (!plot_data_.has_grid()) {
+                throw std::runtime_error("Zone '" + name_ + "' has no grid");
+            }
+            return plot_data_.grid();
+        }
+
+        inline const Grid &require_grid() const {
+            if (!plot_data_.has_grid()) {
+                throw std::runtime_error("Zone '" + name_ + "' has no grid");
+            }
+            return plot_data_.grid();
+        }
 
       public:
         inline Zone(const std::string &name, const std::string &type, const dp::Polygon &boundary,
                     const dp::Grid<uint8_t> &initial_grid, const dp::Geo &datum)
-            : id_(generateUUID()), name_(name), type_(type), poly_data_(name, type, "default", boundary),
-              grid_data_(name, type, "default") {
-            set_datum(datum);
-            auto aabb = boundary.get_aabb();
-            dp::Pose grid_pose{aabb.center(), dp::Euler{0, 0, 0}.to_quaternion()};
-            grid_data_.shift() = grid_pose;
-            grid_data_.resolution() = initial_grid.resolution;
-            grid_data_.add_grid(initial_grid, "base_layer", "terrain");
-            sync_to_poly_grid();
+            : plot_data_(name, type, boundary, initial_grid, datum), id_(generateUUID()), name_(name), type_(type) {
+            sync_to_plot();
         }
 
         inline Zone(const std::string &name, const std::string &type, const dp::Polygon &boundary, const dp::Geo &datum,
                     double resolution = 1.0)
-            : id_(generateUUID()), name_(name), type_(type), poly_data_(name, type, "default", boundary),
-              grid_data_(name, type, "default") {
-            set_datum(datum);
+            : plot_data_(name, type, boundary, datum, resolution), id_(generateUUID()), name_(name), type_(type) {
+            sync_to_plot();
+        }
 
-            auto aabb = boundary.get_aabb();
+        inline Zone(const std::string &name, const std::string &type, const Plot &plot)
+            : plot_data_(plot), id_(generateUUID()), name_(name), type_(type) {
+            sync_to_plot();
+        }
 
-            double padding = resolution * 2.0;
-            dp::Point aabb_size = aabb.max_point - aabb.min_point;
-            double grid_width = aabb_size.x + padding;
-            double grid_height = aabb_size.y + padding;
-
-            size_t grid_rows = static_cast<size_t>(std::ceil(grid_height / resolution));
-            size_t grid_cols = static_cast<size_t>(std::ceil(grid_width / resolution));
-
-            grid_rows = std::max(grid_rows, static_cast<size_t>(1));
-            grid_cols = std::max(grid_cols, static_cast<size_t>(1));
-
-            dp::Pose grid_pose{aabb.center(), dp::Euler{0, 0, 0}.to_quaternion()};
-            dp::Grid<uint8_t> generated_grid;
-            generated_grid.rows = grid_rows;
-            generated_grid.cols = grid_cols;
-            generated_grid.resolution = resolution;
-            generated_grid.centered = true;
-            generated_grid.pose = grid_pose;
-            generated_grid.data.resize(grid_rows * grid_cols, 0);
-
-            grid_data_.shift() = grid_pose;
-            grid_data_.resolution() = resolution;
-
-            entropy::noise::NoiseGen noise;
-            noise.SetNoiseType(entropy::noise::NoiseGen::NoiseType_OpenSimplex2);
-            auto sz = std::max(aabb_size.x, aabb_size.y);
-            noise.SetFrequency(sz / 300000.0f);
-            noise.SetSeed(std::random_device{}());
-
-            for (size_t r = 0; r < generated_grid.rows; ++r) {
-                for (size_t c = 0; c < generated_grid.cols; ++c) {
-                    auto cell_center = generated_grid.get_point(r, c);
-
-                    if (boundary.contains(cell_center)) {
-                        generated_grid(r, c) = 255;
-                    } else {
-                        generated_grid(r, c) = 0;
-                    }
-                }
-            }
-
-            grid_data_.add_grid(generated_grid, "base_layer", "terrain");
-            sync_to_poly_grid();
+        inline Zone(const std::string &name, const std::string &type, Plot &&plot)
+            : plot_data_(std::move(plot)), id_(generateUUID()), name_(name), type_(type) {
+            sync_to_plot();
         }
 
         inline const UUID &id() const { return id_; }
         inline const std::string &name() const { return name_; }
         inline const std::string &type() const { return type_; }
 
+        inline void set_id(const UUID &id) {
+            id_ = id;
+            sync_to_plot();
+        }
+
         inline void set_name(const std::string &name) {
             name_ = name;
-            poly_data_.set_name(name);
-            grid_data_.set_name(name);
+            plot_data_.set_name(name);
         }
 
         inline void set_type(const std::string &type) {
             type_ = type;
-            poly_data_.set_type(type);
-            grid_data_.set_type(type);
+            plot_data_.set_type(type);
         }
 
         inline void set_property(const std::string &key, const std::string &value) { properties_[key] = value; }
@@ -137,6 +328,136 @@ namespace zoneout {
         }
 
         inline const std::unordered_map<std::string, std::string> &properties() const { return properties_; }
+        inline const std::vector<UUID> &node_ids() const { return node_ids_; }
+        inline std::vector<UUID> &node_ids() { return node_ids_; }
+        inline const std::vector<Zone> &children() const { return children_; }
+        inline std::vector<Zone> &children() { return children_; }
+        inline size_t child_count() const { return children_.size(); }
+
+        inline void add_child(const Zone &child) {
+            if (!child.id().isNull() && find(child.id()) != nullptr) {
+                throw std::runtime_error("Cannot add child zone: duplicate zone UUID in subtree");
+            }
+
+            if (plot_data_.poly().has_field_boundary() && child.poly().has_field_boundary()) {
+                const auto &parent_boundary = plot_data_.poly().field_boundary();
+                for (const auto &point : child.poly().field_boundary().vertices) {
+                    if (!parent_boundary.contains(point)) {
+                        throw std::runtime_error("Cannot add child zone: child boundary must lie inside parent zone");
+                    }
+                }
+            }
+
+            children_.push_back(child);
+        }
+
+        inline void add_child(Zone &&child) {
+            if (!child.id().isNull() && find(child.id()) != nullptr) {
+                throw std::runtime_error("Cannot add child zone: duplicate zone UUID in subtree");
+            }
+
+            if (plot_data_.poly().has_field_boundary() && child.poly().has_field_boundary()) {
+                const auto &parent_boundary = plot_data_.poly().field_boundary();
+                for (const auto &point : child.poly().field_boundary().vertices) {
+                    if (!parent_boundary.contains(point)) {
+                        throw std::runtime_error("Cannot add child zone: child boundary must lie inside parent zone");
+                    }
+                }
+            }
+
+            children_.push_back(std::move(child));
+        }
+
+        inline bool remove_child(const UUID &child_id) {
+            auto it = std::find_if(children_.begin(), children_.end(),
+                                   [&child_id](const Zone &child) { return child.id() == child_id; });
+            if (it != children_.end()) {
+                children_.erase(it);
+                return true;
+            }
+
+            for (auto &child : children_) {
+                if (child.remove_child(child_id)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        inline Zone *find(const UUID &zone_id) {
+            if (id_ == zone_id) {
+                return this;
+            }
+            for (auto &child : children_) {
+                if (auto *found = child.find(zone_id); found != nullptr) {
+                    return found;
+                }
+            }
+            return nullptr;
+        }
+
+        inline const Zone *find(const UUID &zone_id) const {
+            if (id_ == zone_id) {
+                return this;
+            }
+            for (const auto &child : children_) {
+                if (auto *found = child.find(zone_id); found != nullptr) {
+                    return found;
+                }
+            }
+            return nullptr;
+        }
+
+        inline Zone *find_by_name(const std::string &zone_name) {
+            if (name_ == zone_name) {
+                return this;
+            }
+            for (auto &child : children_) {
+                if (auto *found = child.find_by_name(zone_name); found != nullptr) {
+                    return found;
+                }
+            }
+            return nullptr;
+        }
+
+        inline const Zone *find_by_name(const std::string &zone_name) const {
+            if (name_ == zone_name) {
+                return this;
+            }
+            for (const auto &child : children_) {
+                if (auto *found = child.find_by_name(zone_name); found != nullptr) {
+                    return found;
+                }
+            }
+            return nullptr;
+        }
+
+        template <typename F> inline void visit(F &&visitor, size_t depth = 0) {
+            visitor(*this, depth);
+            for (auto &child : children_) {
+                child.visit(visitor, depth + 1);
+            }
+        }
+
+        template <typename F> inline void visit(F &&visitor, size_t depth = 0) const {
+            visitor(*this, depth);
+            for (const auto &child : children_) {
+                child.visit(visitor, depth + 1);
+            }
+        }
+
+        inline dp::Optional<size_t> depth_of(const UUID &zone_id, size_t depth = 0) const {
+            if (id_ == zone_id) {
+                return depth;
+            }
+            for (const auto &child : children_) {
+                auto child_depth = child.depth_of(zone_id, depth + 1);
+                if (child_depth.has_value()) {
+                    return child_depth;
+                }
+            }
+            return dp::nullopt;
+        }
 
         /// Remove a property by key. Returns true if the property was found and removed.
         inline bool remove_property(const std::string &key) { return properties_.erase(key) > 0; }
@@ -146,22 +467,24 @@ namespace zoneout {
 
         /// Check if a property exists
         inline bool has_property(const std::string &key) const { return properties_.find(key) != properties_.end(); }
+        inline void set_node_ids(const std::vector<UUID> &node_ids) { node_ids_ = node_ids; }
+        inline void clear_node_ids() { node_ids_.clear(); }
 
-        inline const dp::Geo &datum() const { return poly_data_.datum(); }
+        inline const dp::Geo &datum() const { return plot_data_.datum(); }
 
-        inline void set_datum(const dp::Geo &datum) {
-            poly_data_.set_datum(datum);
-            grid_data_.datum() = datum;
-        }
+        inline void set_datum(const dp::Geo &datum) { plot_data_.set_datum(datum); }
 
         inline void add_raster_layer(const dp::Grid<uint8_t> &grid, const std::string &name,
                                      const std::string &type = "",
                                      const std::unordered_map<std::string, std::string> &properties = {},
                                      bool poly_cut = false, int layer_index = -1) {
-            if (poly_cut && poly_data_.has_field_boundary()) {
+            (void)layer_index;
+            ensure_grid_initialized(grid);
+
+            if (poly_cut && plot_data_.poly().has_field_boundary()) {
                 auto modified_grid = grid;
 
-                auto boundary = poly_data_.field_boundary();
+                auto boundary = plot_data_.poly().field_boundary();
 
                 size_t cells_inside = 0;
                 size_t total_cells = modified_grid.rows * modified_grid.cols;
@@ -178,17 +501,17 @@ namespace zoneout {
                     }
                 }
 
-                grid_data_.add_grid(modified_grid, name, type, properties);
+                require_grid().add_grid(modified_grid, name, type, properties);
             } else {
-                grid_data_.add_grid(grid, name, type, properties);
+                require_grid().add_grid(grid, name, type, properties);
             }
         }
 
         inline std::string raster_info() const {
-            if (grid_data_.layer_count() > 0) {
-                const auto &first_layer = grid_data_.get_layer(0);
+            if (plot_data_.has_grid() && plot_data_.grid().layer_count() > 0) {
+                const auto &first_layer = plot_data_.grid().get_layer(0);
                 return "Raster size: " + std::to_string(first_layer.width) + "x" + std::to_string(first_layer.height) +
-                       " (" + std::to_string(grid_data_.layer_count()) + " layers)";
+                       " (" + std::to_string(plot_data_.grid().layer_count()) + " layers)";
             }
             return "No raster layers";
         }
@@ -196,8 +519,8 @@ namespace zoneout {
         inline void add_polygon_element(const dp::Polygon &geometry, const std::string &name,
                                         const std::string &type = "", const std::string &subtype = "default",
                                         const std::unordered_map<std::string, std::string> &properties = {}) {
-            if (poly_data_.has_field_boundary()) {
-                auto boundary = poly_data_.field_boundary();
+            if (plot_data_.poly().has_field_boundary()) {
+                auto boundary = plot_data_.poly().field_boundary();
 
                 for (const auto &point : geometry.vertices) {
                     if (!boundary.contains(point)) {
@@ -212,8 +535,8 @@ namespace zoneout {
             static std::uniform_int_distribution<> color_dist(50, 200);
             uint8_t polygon_color = static_cast<uint8_t>(color_dist(gen));
 
-            if (grid_data_.layer_count() > 0) {
-                auto &grid_variant = grid_data_.get_layer(0).grid;
+            if (plot_data_.has_grid() && plot_data_.grid().layer_count() > 0) {
+                auto &grid_variant = plot_data_.grid().get_layer(0).grid;
                 std::visit(
                     [&](auto &base_grid) {
                         using GridType = std::decay_t<decltype(base_grid)>;
@@ -234,13 +557,13 @@ namespace zoneout {
 
             UUID element_id = generateUUID();
 
-            poly_data_.add_polygon_element(element_id, name, type, subtype, geometry, properties);
+            plot_data_.poly().add_polygon_element(element_id, name, type, subtype, geometry, properties);
         }
 
         inline std::string element_info() const {
-            const auto &polygon_elements = poly_data_.polygon_elements();
-            const auto &line_elements = poly_data_.line_elements();
-            const auto &point_elements = poly_data_.point_elements();
+            const auto &polygon_elements = plot_data_.poly().polygon_elements();
+            const auto &line_elements = plot_data_.poly().line_elements();
+            const auto &point_elements = plot_data_.poly().point_elements();
 
             size_t total_elements = polygon_elements.size() + line_elements.size() + point_elements.size();
 
@@ -255,12 +578,12 @@ namespace zoneout {
         // ============ Spatial Queries ============
 
         /// Check if a point is inside this zone's boundary
-        inline bool contains(const dp::Point &point) const { return poly_data_.contains(point); }
+        inline bool contains(const dp::Point &point) const { return plot_data_.poly().contains(point); }
 
         /// Get all polygon elements that intersect with the given bounding box
         inline std::vector<PolygonElement> polygon_elements_in_area(const dp::AABB &bbox) const {
             std::vector<PolygonElement> result;
-            for (const auto &elem : poly_data_.polygon_elements()) {
+            for (const auto &elem : plot_data_.poly().polygon_elements()) {
                 auto elem_aabb = elem.geometry.get_aabb();
                 // Use AABB's built-in intersects method
                 if (elem_aabb.intersects(bbox)) {
@@ -273,7 +596,7 @@ namespace zoneout {
         /// Get all point elements within the given bounding box
         inline std::vector<PointElement> point_elements_in_area(const dp::AABB &bbox) const {
             std::vector<PointElement> result;
-            for (const auto &elem : poly_data_.point_elements()) {
+            for (const auto &elem : plot_data_.poly().point_elements()) {
                 if (bbox.contains(elem.geometry)) {
                     result.push_back(elem);
                 }
@@ -284,7 +607,7 @@ namespace zoneout {
         /// Get all line elements that intersect with the given bounding box
         inline std::vector<LineElement> line_elements_in_area(const dp::AABB &bbox) const {
             std::vector<LineElement> result;
-            for (const auto &elem : poly_data_.line_elements()) {
+            for (const auto &elem : plot_data_.poly().line_elements()) {
                 // Check if either endpoint is in the bbox
                 if (bbox.contains(elem.geometry.start) || bbox.contains(elem.geometry.end)) {
                     result.push_back(elem);
@@ -296,7 +619,7 @@ namespace zoneout {
         /// Get all point elements that are inside the given polygon
         inline std::vector<PointElement> points_in_polygon(const dp::Polygon &area) const {
             std::vector<PointElement> result;
-            for (const auto &elem : poly_data_.point_elements()) {
+            for (const auto &elem : plot_data_.poly().point_elements()) {
                 if (area.contains(elem.geometry)) {
                     result.push_back(elem);
                 }
@@ -306,58 +629,25 @@ namespace zoneout {
 
         /// Get the zone's bounding box
         inline dp::AABB bounding_box() const {
-            if (poly_data_.has_field_boundary()) {
-                return poly_data_.field_boundary().get_aabb();
+            if (plot_data_.poly().has_field_boundary()) {
+                return plot_data_.poly().field_boundary().get_aabb();
             }
             return dp::AABB{};
         }
 
-        inline bool is_valid() const { return poly_data_.is_valid() && grid_data_.is_valid(); }
+        inline bool is_valid() const { return plot_data_.is_valid(); }
 
-        inline static Zone from_files(const std::filesystem::path &vector_path,
-                                      const std::filesystem::path &raster_path) {
-            auto [poly, grid] = loadPolyGrid(vector_path, raster_path);
-
-            auto datum = poly.datum();
-
-            dp::Grid<uint8_t> base_grid;
-            if (grid.has_layers()) {
-                base_grid = std::get<dp::Grid<uint8_t>>(grid.get_layer(0).grid);
-            } else {
-                dp::Pose shift{dp::Point{0.0, 0.0, 0.0}, dp::Euler{0, 0, 0}.to_quaternion()};
-                base_grid.rows = 10;
-                base_grid.cols = 10;
-                base_grid.resolution = 1.0;
-                base_grid.centered = true;
-                base_grid.pose = shift;
-                base_grid.data.resize(100, 0);
-            }
-
-            dp::Polygon default_boundary;
-            Zone zone("", "", default_boundary, base_grid, datum);
-            zone.poly_data_ = poly;
-            zone.grid_data_ = grid;
-
-            if (poly.name().empty() && !grid.name().empty()) {
-                zone.name_ = grid.name();
-            } else {
-                zone.name_ = poly.name();
-            }
-
-            if (poly.type().empty() && !grid.type().empty()) {
-                zone.type_ = grid.type();
-            } else {
-                zone.type_ = poly.type();
-            }
-
-            if (!poly.id().isNull()) {
-                zone.id_ = poly.id();
-            } else if (!grid.id().isNull()) {
-                zone.id_ = grid.id();
-            }
+        inline static Zone load_plot_files(const std::filesystem::path &vector_path,
+                                           const std::filesystem::path &raster_path) {
+            auto plot = Plot::from_files(vector_path, raster_path);
+            const auto loaded_id = plot.id();
+            Zone zone(plot.name(), plot.type(), std::move(plot));
+            zone.name_ = zone.plot_data_.name();
+            zone.type_ = zone.plot_data_.type();
+            zone.id_ = loaded_id;
 
             if (std::filesystem::exists(vector_path)) {
-                auto field_props = poly.global_properties();
+                auto field_props = zone.plot_data_.poly().global_properties();
                 for (const auto &[key, value] : field_props) {
                     if (key.substr(0, 5) == "prop_") {
                         zone.set_property(key.substr(5), value);
@@ -365,138 +655,75 @@ namespace zoneout {
                 }
             }
 
-            zone.sync_to_poly_grid();
+            zone.load_metadata_file(metadata_path_for(vector_path));
+            zone.sync_to_plot();
             return zone;
         }
 
-        inline void to_files(const std::filesystem::path &vector_path, const std::filesystem::path &raster_path) const {
-            const_cast<Zone *>(this)->sync_to_poly_grid();
+        inline void save_plot_files(const std::filesystem::path &vector_path,
+                                    const std::filesystem::path &raster_path) const {
+            const_cast<Zone *>(this)->sync_to_plot();
 
-            auto poly_copy = poly_data_;
-            auto grid_copy = grid_data_;
-
-            poly_copy.set_id(id_);
-            grid_copy.set_id(id_);
-
-            for (const auto &[key, value] : properties_) {
-                poly_copy.set_global_property("prop_" + key, value);
+            auto plot_copy = plot_data_;
+            plot_copy.poly().set_id(id_);
+            if (plot_copy.has_grid()) {
+                plot_copy.grid().set_id(id_);
             }
 
-            savePolyGrid(poly_copy, grid_copy, vector_path, raster_path);
+            for (const auto &[key, value] : properties_) {
+                plot_copy.poly().set_global_property("prop_" + key, value);
+            }
+
+            plot_copy.to_files(vector_path, raster_path);
+            save_metadata_file(metadata_path_for(vector_path));
         }
 
         inline void save(const std::filesystem::path &directory) const {
             std::filesystem::create_directories(directory);
             auto vector_path = directory / "vector.geojson";
             auto raster_path = directory / "raster.tiff";
-            to_files(vector_path, raster_path);
+            save_plot_files(vector_path, raster_path);
+            save_metadata(directory);
+
+            for (size_t i = 0; i < children_.size(); ++i) {
+                children_[i].save(directory / ("child_" + std::to_string(i)));
+            }
         }
 
         inline static Zone load(const std::filesystem::path &directory) {
             auto vector_path = directory / "vector.geojson";
             auto raster_path = directory / "raster.tiff";
-            return from_files(vector_path, raster_path);
-        }
+            auto zone = load_plot_files(vector_path, raster_path);
+            zone.load_metadata(directory);
 
-        inline const vectkit::FeatureCollection &vector_data() const { return poly_data_.collection(); }
-        inline const rastkit::RasterCollection &raster_data() const { return grid_data_.raster(); }
-
-        inline vectkit::FeatureCollection &vector_data() { return poly_data_.collection(); }
-        inline rastkit::RasterCollection &raster_data() { return grid_data_.raster(); }
-
-        inline std::string global_property(const char *global_name) const {
-            auto field_props = poly_data_.global_properties();
-            auto it = field_props.find(global_name);
-            if (it != field_props.end()) {
-                return it->second;
-            }
-
-            if (grid_data_.has_layers()) {
-                auto metadata = grid_data_.raster().getGlobalPropertiesFromFirstLayer();
-                auto grid_it = metadata.find(global_name);
-                if (grid_it != metadata.end()) {
-                    return grid_it->second;
+            for (size_t i = 0;; ++i) {
+                auto child_dir = directory / ("child_" + std::to_string(i));
+                if (!std::filesystem::exists(child_dir)) {
+                    break;
                 }
+                zone.children_.push_back(load(child_dir));
             }
-            return "";
+
+            return zone;
         }
 
-        inline void set_global_property(const char *global_name, const std::string &value) {
-            poly_data_.set_global_property(global_name, value);
-            if (grid_data_.has_layers()) {
-                grid_data_.get_layer(0).setGlobalProperty(global_name, value);
+        inline bool has_grid() const { return plot_data_.has_grid(); }
+
+        inline void sync_to_plot() {
+            plot_data_.set_name(name_);
+            plot_data_.set_type(type_);
+            plot_data_.poly().set_id(id_);
+            if (plot_data_.has_grid()) {
+                plot_data_.grid().set_id(id_);
             }
-        }
-
-        inline void sync_to_poly_grid() {
-            poly_data_.set_name(name_);
-            poly_data_.set_type(type_);
-            poly_data_.set_id(id_);
-
-            grid_data_.set_name(name_);
-            grid_data_.set_type(type_);
-            grid_data_.set_id(id_);
         }
 
         // Accessors for internal data structures
-        inline Poly &poly() { return poly_data_; }
-        inline const Poly &poly() const { return poly_data_; }
+        inline Plot &plot() { return plot_data_; }
+        inline const Plot &plot() const { return plot_data_; }
 
-        inline Grid &grid() { return grid_data_; }
-        inline const Grid &grid() const { return grid_data_; }
-
-        // ============ Raster Layer Convenience Helpers ============
-
-        /// Get number of raster layers
-        inline size_t layer_count() const { return grid_data_.layer_count(); }
-
-        /// Check if zone has any raster layers
-        inline bool has_layers() const { return grid_data_.has_layers(); }
-
-        /// Get layer by index
-        inline rastkit::Layer &layer(size_t index) { return grid_data_.get_layer(index); }
-        inline const rastkit::Layer &layer(size_t index) const { return grid_data_.get_layer(index); }
-
-        /// Visit a raster layer's grid with a callable (handles all grid types)
-        template <typename F> auto visit_raster(size_t layer_index, F &&func) {
-            return std::visit(std::forward<F>(func), grid_data_.get_layer(layer_index).grid);
-        }
-
-        template <typename F> auto visit_raster(size_t layer_index, F &&func) const {
-            return std::visit(std::forward<F>(func), grid_data_.get_layer(layer_index).grid);
-        }
-
-        /// Get raster layer rows
-        inline size_t layer_rows(size_t layer_index) const {
-            return rastkit::get_grid_dimensions(grid_data_.get_layer(layer_index).grid).first;
-        }
-
-        /// Get raster layer cols
-        inline size_t layer_cols(size_t layer_index) const {
-            return rastkit::get_grid_dimensions(grid_data_.get_layer(layer_index).grid).second;
-        }
-
-        /// Get world point for cell in a raster layer
-        inline dp::Point layer_point(size_t layer_index, size_t r, size_t c) const {
-            return std::visit([r, c](const auto &g) { return g.get_point(r, c); },
-                              grid_data_.get_layer(layer_index).grid);
-        }
-
-        /// Type-safe raster access - returns dp::Optional if wrong type
-        template <typename T> inline dp::Optional<std::reference_wrapper<dp::Grid<T>>> raster_as(size_t layer_index) {
-            auto *ptr = grid_data_.get_layer(layer_index).template gridIf<T>();
-            if (ptr)
-                return std::ref(*ptr);
-            return dp::nullopt;
-        }
-
-        template <typename T>
-        inline dp::Optional<std::reference_wrapper<const dp::Grid<T>>> raster_as(size_t layer_index) const {
-            const auto *ptr = grid_data_.get_layer(layer_index).template gridIf<T>();
-            if (ptr)
-                return std::cref(*ptr);
-            return dp::nullopt;
-        }
+        inline Poly &poly() { return plot_data_.poly(); }
+        inline const Poly &poly() const { return plot_data_.poly(); }
     };
 
     // Factory helper for creating zones with validation

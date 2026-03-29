@@ -1,22 +1,16 @@
 #pragma once
 
-#include <algorithm>
-#include <ctime>
 #include <filesystem>
 #include <fstream>
-#include <functional>
-#include <iostream>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include <concord/concord.hpp>
 #include <datapod/datapod.hpp>
 
 #include "microtar/microtar.hpp"
-#include "utils/uuid.hpp"
-#include "zone.hpp"
+#include "polygrid.hpp"
 
 namespace dp = datapod;
 
@@ -24,203 +18,195 @@ namespace zoneout {
 
     class Plot {
       private:
-        UUID id_;
-        std::string name_;
-        std::string type_;
-        std::vector<Zone> zones_;
-        std::unordered_map<std::string, std::string> properties_;
-        dp::Geo datum_;
+        Poly poly_;
+        std::optional<Grid> grid_;
+
+        inline static Grid make_base_grid(const dp::Polygon &boundary, double resolution, const dp::Geo &datum,
+                                          const std::string &name, const std::string &type) {
+            auto aabb = boundary.get_aabb();
+
+            double padding = resolution * 2.0;
+            dp::Point aabb_size = aabb.max_point - aabb.min_point;
+            double grid_width = aabb_size.x + padding;
+            double grid_height = aabb_size.y + padding;
+
+            size_t grid_rows = static_cast<size_t>(std::ceil(grid_height / resolution));
+            size_t grid_cols = static_cast<size_t>(std::ceil(grid_width / resolution));
+
+            grid_rows = std::max(grid_rows, static_cast<size_t>(1));
+            grid_cols = std::max(grid_cols, static_cast<size_t>(1));
+
+            dp::Pose grid_pose{aabb.center(), dp::Euler{0, 0, 0}.to_quaternion()};
+            dp::Grid<uint8_t> generated_grid;
+            generated_grid.rows = grid_rows;
+            generated_grid.cols = grid_cols;
+            generated_grid.resolution = resolution;
+            generated_grid.centered = true;
+            generated_grid.pose = grid_pose;
+            generated_grid.data.resize(grid_rows * grid_cols, 0);
+
+            for (size_t r = 0; r < generated_grid.rows; ++r) {
+                for (size_t c = 0; c < generated_grid.cols; ++c) {
+                    auto cell_center = generated_grid.get_point(r, c);
+                    generated_grid(r, c) = boundary.contains(cell_center) ? uint8_t{255} : uint8_t{0};
+                }
+            }
+
+            Grid grid(name, type, "default");
+            grid.datum() = datum;
+            grid.shift() = grid_pose;
+            grid.resolution() = resolution;
+            grid.add_grid(generated_grid, "base_layer", "terrain");
+            return grid;
+        }
 
       public:
-        inline Plot(const std::string &name, const std::string &type, const dp::Geo &datum)
-            : id_(generateUUID()), name_(name), type_(type), datum_(datum) {}
+        Plot() : poly_(), grid_(std::nullopt) {}
 
-        inline Plot(const UUID &id, const std::string &name, const std::string &type, const dp::Geo &datum)
-            : id_(id), name_(name), type_(type), datum_(datum) {}
+        Plot(const Poly &poly) : poly_(poly), grid_(std::nullopt) {}
+        Plot(Poly &&poly) : poly_(std::move(poly)), grid_(std::nullopt) {}
 
-        inline const UUID &id() const { return id_; }
+        Plot(const Poly &poly, const Grid &grid) : poly_(poly), grid_(grid) {}
+        Plot(Poly &&poly, Grid &&grid) : poly_(std::move(poly)), grid_(std::move(grid)) {}
 
-        inline const std::string &name() const { return name_; }
-        inline void set_name(const std::string &name) { name_ = name; }
+        Plot(const std::string &name, const std::string &type, const dp::Polygon &boundary, const dp::Geo &datum)
+            : poly_(name, type, "default", boundary), grid_(std::nullopt) {
+            poly_.set_datum(datum);
+        }
 
-        inline const std::string &type() const { return type_; }
-        inline void set_type(const std::string &type) { type_ = type; }
+        Plot(const std::string &name, const std::string &type, const dp::Polygon &boundary, const dp::Geo &datum,
+             double resolution)
+            : poly_(name, type, "default", boundary), grid_(make_base_grid(boundary, resolution, datum, name, type)) {
+            poly_.set_datum(datum);
+        }
 
-        inline const dp::Geo &datum() const { return datum_; }
-        inline void set_datum(const dp::Geo &datum) { datum_ = datum; }
+        Plot(const std::string &name, const std::string &type, const dp::Polygon &boundary,
+             const dp::Grid<uint8_t> &initial_grid, const dp::Geo &datum)
+            : poly_(name, type, "default", boundary), grid_(Grid(name, type, "default")) {
+            poly_.set_datum(datum);
+            grid_->datum() = datum;
+            auto aabb = boundary.get_aabb();
+            grid_->shift() = dp::Pose{aabb.center(), dp::Euler{0, 0, 0}.to_quaternion()};
+            grid_->resolution() = initial_grid.resolution;
+            grid_->add_grid(initial_grid, "base_layer", "terrain");
+        }
 
-        inline void add_zone(const Zone &zone) { zones_.push_back(zone); }
+        inline Poly &poly() { return poly_; }
+        inline const Poly &poly() const { return poly_; }
 
-        inline bool remove_zone(const UUID &zone_id) {
-            auto it = std::find_if(zones_.begin(), zones_.end(),
-                                   [&zone_id](const Zone &zone) { return zone.id() == zone_id; });
-            if (it != zones_.end()) {
-                zones_.erase(it);
-                return true;
+        inline bool has_grid() const { return grid_.has_value(); }
+        inline Grid &grid() { return grid_.value(); }
+        inline const Grid &grid() const { return grid_.value(); }
+
+        inline void set_grid(const Grid &grid) { grid_ = grid; }
+        inline void set_grid(Grid &&grid) { grid_ = std::move(grid); }
+        inline void clear_grid() { grid_.reset(); }
+
+        inline const UUID &id() const { return poly_.id(); }
+
+        inline const std::string &name() const { return poly_.name(); }
+        inline void set_name(const std::string &name) {
+            poly_.set_name(name);
+            if (grid_) {
+                grid_->set_name(name);
             }
-            return false;
         }
 
-        inline dp::Optional<std::reference_wrapper<Zone>> zone(const UUID &zone_id) {
-            auto it = std::find_if(zones_.begin(), zones_.end(),
-                                   [&zone_id](const Zone &zone) { return zone.id() == zone_id; });
-            if (it != zones_.end())
-                return std::ref(*it);
-            return dp::nullopt;
-        }
-
-        inline dp::Optional<std::reference_wrapper<const Zone>> zone(const UUID &zone_id) const {
-            auto it = std::find_if(zones_.begin(), zones_.end(),
-                                   [&zone_id](const Zone &zone) { return zone.id() == zone_id; });
-            if (it != zones_.end())
-                return std::cref(*it);
-            return dp::nullopt;
-        }
-
-        inline const std::vector<Zone> &zones() const { return zones_; }
-        inline std::vector<Zone> &zones() { return zones_; }
-
-        inline size_t zone_count() const { return zones_.size(); }
-
-        inline bool empty() const { return zones_.empty(); }
-
-        inline void clear() { zones_.clear(); }
-
-        // ============ Convenience Queries ============
-
-        /// Find a zone by name. Returns dp::Optional with reference if found.
-        inline dp::Optional<std::reference_wrapper<Zone>> zone_by_name(const std::string &zone_name) {
-            auto it = std::find_if(zones_.begin(), zones_.end(),
-                                   [&zone_name](const Zone &z) { return z.name() == zone_name; });
-            if (it != zones_.end())
-                return std::ref(*it);
-            return dp::nullopt;
-        }
-
-        inline dp::Optional<std::reference_wrapper<const Zone>> zone_by_name(const std::string &zone_name) const {
-            auto it = std::find_if(zones_.begin(), zones_.end(),
-                                   [&zone_name](const Zone &z) { return z.name() == zone_name; });
-            if (it != zones_.end())
-                return std::cref(*it);
-            return dp::nullopt;
-        }
-
-        /// Find all zones of a given type
-        inline std::vector<std::reference_wrapper<Zone>> zones_by_type(const std::string &zone_type) {
-            std::vector<std::reference_wrapper<Zone>> result;
-            for (auto &z : zones_) {
-                if (z.type() == zone_type) {
-                    result.push_back(std::ref(z));
-                }
+        inline const std::string &type() const { return poly_.type(); }
+        inline void set_type(const std::string &type) {
+            poly_.set_type(type);
+            if (grid_) {
+                grid_->set_type(type);
             }
-            return result;
         }
 
-        inline std::vector<std::reference_wrapper<const Zone>> zones_by_type(const std::string &zone_type) const {
-            std::vector<std::reference_wrapper<const Zone>> result;
-            for (const auto &z : zones_) {
-                if (z.type() == zone_type) {
-                    result.push_back(std::cref(z));
-                }
+        inline const dp::Geo &datum() const { return poly_.datum(); }
+        inline void set_datum(const dp::Geo &datum) {
+            poly_.set_datum(datum);
+            if (grid_) {
+                grid_->datum() = datum;
             }
-            return result;
         }
 
-        /// Check if plot contains a zone with the given name
-        inline bool has_zone(const std::string &zone_name) const {
-            return std::any_of(zones_.begin(), zones_.end(),
-                               [&zone_name](const Zone &z) { return z.name() == zone_name; });
+        inline void set_property(const std::string &key, const std::string &value) {
+            poly_.set_global_property("prop_" + key, value);
         }
-
-        /// Check if plot contains a zone with the given ID
-        inline bool has_zone(const UUID &zone_id) const {
-            return std::any_of(zones_.begin(), zones_.end(), [&zone_id](const Zone &z) { return z.id() == zone_id; });
-        }
-
-        // ============ Spatial Queries ============
-
-        /// Get all zones that contain the given point
-        inline std::vector<std::reference_wrapper<Zone>> zones_containing(const dp::Point &point) {
-            std::vector<std::reference_wrapper<Zone>> result;
-            for (auto &z : zones_) {
-                if (z.contains(point)) {
-                    result.push_back(std::ref(z));
-                }
-            }
-            return result;
-        }
-
-        inline std::vector<std::reference_wrapper<const Zone>> zones_containing(const dp::Point &point) const {
-            std::vector<std::reference_wrapper<const Zone>> result;
-            for (const auto &z : zones_) {
-                if (z.contains(point)) {
-                    result.push_back(std::cref(z));
-                }
-            }
-            return result;
-        }
-
-        /// Get pairs of zones whose bounding boxes overlap
-        inline std::vector<std::pair<size_t, size_t>> overlapping_zone_indices() const {
-            std::vector<std::pair<size_t, size_t>> result;
-            for (size_t i = 0; i < zones_.size(); ++i) {
-                for (size_t j = i + 1; j < zones_.size(); ++j) {
-                    auto bbox_i = zones_[i].bounding_box();
-                    auto bbox_j = zones_[j].bounding_box();
-                    // Check AABB overlap
-                    if (!(bbox_i.max_point.x < bbox_j.min_point.x || bbox_i.min_point.x > bbox_j.max_point.x ||
-                          bbox_i.max_point.y < bbox_j.min_point.y || bbox_i.min_point.y > bbox_j.max_point.y)) {
-                        result.emplace_back(i, j);
-                    }
-                }
-            }
-            return result;
-        }
-
-        /// Get the combined bounding box of all zones
-        inline dp::AABB bounding_box() const {
-            if (zones_.empty()) {
-                return dp::AABB{};
-            }
-            auto bbox = zones_[0].bounding_box();
-            for (size_t i = 1; i < zones_.size(); ++i) {
-                bbox.expand(zones_[i].bounding_box());
-            }
-            return bbox;
-        }
-
-        inline void set_property(const std::string &key, const std::string &value) { properties_[key] = value; }
 
         inline dp::Optional<std::string> property(const std::string &key) const {
-            auto it = properties_.find(key);
-            if (it != properties_.end())
-                return it->second;
-            return dp::nullopt;
+            return poly_.global_property("prop_" + key);
         }
 
-        inline const std::unordered_map<std::string, std::string> &properties() const { return properties_; }
+        inline bool has_property(const std::string &key) const { return poly_.has_global_property("prop_" + key); }
 
-        /// Remove a property by key. Returns true if the property was found and removed.
-        inline bool remove_property(const std::string &key) { return properties_.erase(key) > 0; }
+        inline bool remove_property(const std::string &key) { return poly_.remove_global_property("prop_" + key); }
 
-        /// Clear all properties
-        inline void clear_properties() { properties_.clear(); }
+        inline void clear_properties() {
+            auto props = poly_.global_properties();
+            for (const auto &[key, value] : props) {
+                (void)value;
+                if (key.rfind("prop_", 0) == 0) {
+                    poly_.remove_global_property(key);
+                }
+            }
+        }
 
-        /// Check if a property exists
-        inline bool has_property(const std::string &key) const { return properties_.find(key) != properties_.end(); }
+        inline std::unordered_map<std::string, std::string> properties() const {
+            std::unordered_map<std::string, std::string> result;
+            for (const auto &[key, value] : poly_.global_properties()) {
+                if (key.rfind("prop_", 0) == 0) {
+                    result[key.substr(5)] = value;
+                }
+            }
+            return result;
+        }
 
-        inline bool is_valid() const { return !name_.empty() && !type_.empty(); }
+        inline bool is_valid() const { return poly_.is_valid(); }
+
+        inline void to_files(const std::filesystem::path &vector_path, const std::filesystem::path &raster_path) const {
+            if (grid_) {
+                savePolyGrid(poly_, *grid_, vector_path, raster_path);
+            } else {
+                poly_.to_file(vector_path, vectkit::CRS::WGS);
+            }
+        }
 
         inline void save(const std::filesystem::path &directory) const {
             std::filesystem::create_directories(directory);
+            auto vector_path = directory / "vector.geojson";
+            auto raster_path = directory / "raster.tiff";
+            to_files(vector_path, raster_path);
+        }
 
-            for (size_t i = 0; i < zones_.size(); ++i) {
-                auto zone_dir = directory / ("zone_" + std::to_string(i));
-                std::filesystem::create_directories(zone_dir);
-                auto vector_path = zone_dir / "vector.geojson";
-                auto raster_path = zone_dir / "raster.tiff";
-                zones_[i].to_files(vector_path, raster_path);
+        inline static Plot from_files(const std::filesystem::path &vector_path,
+                                      const std::filesystem::path &raster_path) {
+            auto [poly, grid] = loadPolyGrid(vector_path, raster_path);
+            if (grid.has_layers()) {
+                if (poly.name().empty()) {
+                    poly.set_name(grid.name());
+                }
+                if (poly.type().empty()) {
+                    poly.set_type(grid.type());
+                }
+                if (poly.id().isNull()) {
+                    poly.set_id(grid.id());
+                }
             }
+            if (grid.has_layers()) {
+                return Plot(std::move(poly), std::move(grid));
+            }
+            return Plot(std::move(poly));
+        }
+
+        inline static Plot load(const std::filesystem::path &directory) {
+            return from_files(directory / "vector.geojson", directory / "raster.tiff");
+        }
+
+        inline static Plot load(const std::filesystem::path &directory, const std::string &name,
+                                const std::string &type, const dp::Geo &datum) {
+            (void)name;
+            (void)type;
+            (void)datum;
+            return load(directory);
         }
 
         inline void save_tar(const std::filesystem::path &tar_file) const {
@@ -230,40 +216,36 @@ namespace zoneout {
                 throw std::runtime_error("Could not create tar file: " + std::string(mtar_strerror(err)));
             }
 
-            auto temp_dir = std::filesystem::temp_directory_path() / ("plot_" + id_.toString());
+            auto temp_dir = std::filesystem::temp_directory_path() / ("plot_" + id().toString());
             save(temp_dir);
 
             for (const auto &entry : std::filesystem::recursive_directory_iterator(temp_dir)) {
-                if (entry.is_regular_file()) {
-                    auto relative_path = std::filesystem::relative(entry.path(), temp_dir);
-                    std::ifstream file(entry.path(), std::ios::binary);
+                if (!entry.is_regular_file()) {
+                    continue;
+                }
 
-                    if (file.is_open()) {
-                        file.seekg(0, std::ios::end);
-                        size_t file_size = file.tellg();
-                        file.seekg(0, std::ios::beg);
+                auto relative_path = std::filesystem::relative(entry.path(), temp_dir);
+                std::ifstream file(entry.path(), std::ios::binary);
+                file.seekg(0, std::ios::end);
+                size_t file_size = static_cast<size_t>(file.tellg());
+                file.seekg(0, std::ios::beg);
 
-                        err = mtar_write_file_header(&tar, relative_path.string().c_str(), file_size);
-                        if (err != MTAR_ESUCCESS) {
-                            file.close();
-                            mtar_close(&tar);
-                            std::filesystem::remove_all(temp_dir);
-                            throw std::runtime_error("Could not write file header: " + std::string(mtar_strerror(err)));
-                        }
+                err = mtar_write_file_header(&tar, relative_path.string().c_str(), file_size);
+                if (err != MTAR_ESUCCESS) {
+                    file.close();
+                    mtar_close(&tar);
+                    std::filesystem::remove_all(temp_dir);
+                    throw std::runtime_error("Could not write file header: " + std::string(mtar_strerror(err)));
+                }
 
-                        const size_t chunk_size = 8192;
-                        std::vector<char> buffer(chunk_size);
-                        while (file.read(buffer.data(), chunk_size) || file.gcount() > 0) {
-                            err = mtar_write_data(&tar, buffer.data(), file.gcount());
-                            if (err != MTAR_ESUCCESS) {
-                                file.close();
-                                mtar_close(&tar);
-                                std::filesystem::remove_all(temp_dir);
-                                throw std::runtime_error("Could not write file data: " +
-                                                         std::string(mtar_strerror(err)));
-                            }
-                        }
+                std::vector<char> buffer(8192);
+                while (file.read(buffer.data(), buffer.size()) || file.gcount() > 0) {
+                    err = mtar_write_data(&tar, buffer.data(), static_cast<unsigned>(file.gcount()));
+                    if (err != MTAR_ESUCCESS) {
                         file.close();
+                        mtar_close(&tar);
+                        std::filesystem::remove_all(temp_dir);
+                        throw std::runtime_error("Could not write file data: " + std::string(mtar_strerror(err)));
                     }
                 }
             }
@@ -273,116 +255,57 @@ namespace zoneout {
             std::filesystem::remove_all(temp_dir);
         }
 
-        inline void to_files(const std::filesystem::path &directory) const { save(directory); }
-
-        inline static Plot load_tar(const std::filesystem::path &tar_file, const std::string &name,
-                                    const std::string &type, const dp::Geo &datum) {
+        inline static Plot load_tar(const std::filesystem::path &tar_file) {
             mtar_t tar;
             int err = mtar_open(&tar, tar_file.string().c_str(), "r");
             if (err != MTAR_ESUCCESS) {
                 throw std::runtime_error("Could not open tar file: " + std::string(mtar_strerror(err)));
             }
 
-            auto temp_dir = std::filesystem::temp_directory_path() / ("extract_" + std::to_string(std::time(nullptr)));
+            auto temp_dir = std::filesystem::temp_directory_path() / ("plot_extract_" + generateUUID().toString());
             std::filesystem::create_directories(temp_dir);
 
             mtar_header_t header;
             while ((err = mtar_read_header(&tar, &header)) == MTAR_ESUCCESS) {
-                auto file_path = temp_dir / header.name;
-                std::filesystem::create_directories(file_path.parent_path());
+                auto out_path = temp_dir / header.name;
+                std::filesystem::create_directories(out_path.parent_path());
 
-                std::ofstream file(file_path, std::ios::binary);
-                if (file.is_open()) {
-                    const size_t chunk_size = 8192;
-                    std::vector<char> buffer(chunk_size);
-                    size_t remaining = header.size;
-
-                    while (remaining > 0) {
-                        size_t to_read = std::min(chunk_size, remaining);
-                        err = mtar_read_data(&tar, buffer.data(), to_read);
-                        if (err != MTAR_ESUCCESS) {
-                            file.close();
-                            mtar_close(&tar);
-                            std::filesystem::remove_all(temp_dir);
-                            throw std::runtime_error("Could not read file data: " + std::string(mtar_strerror(err)));
-                        }
-                        file.write(buffer.data(), to_read);
-                        remaining -= to_read;
-                    }
-                    file.close();
+                std::ofstream out(out_path, std::ios::binary);
+                std::vector<char> buffer(header.size);
+                if (header.size > 0) {
+                    mtar_read_data(&tar, buffer.data(), header.size);
+                    out.write(buffer.data(), static_cast<std::streamsize>(header.size));
                 }
-
-                err = mtar_next(&tar);
-                if (err != MTAR_ESUCCESS && err != MTAR_ENULLRECORD) {
-                    mtar_close(&tar);
-                    std::filesystem::remove_all(temp_dir);
-                    throw std::runtime_error("Could not advance to next file: " + std::string(mtar_strerror(err)));
-                }
+                out.close();
+                mtar_next(&tar);
             }
 
             mtar_close(&tar);
-
-            Plot plot = load(temp_dir, name, type, datum);
-
+            auto plot = load(temp_dir);
             std::filesystem::remove_all(temp_dir);
-
             return plot;
         }
 
-        inline static Plot load(const std::filesystem::path &directory, const std::string &name,
-                                const std::string &type, const dp::Geo &datum = dp::Geo{0.001, 0.001, 1.0}) {
-            Plot plot(name, type, datum);
-            dp::Geo plot_datum;
-
-            if (std::filesystem::exists(directory)) {
-                for (const auto &entry : std::filesystem::directory_iterator(directory)) {
-                    if (entry.is_directory() && entry.path().filename().string().starts_with("zone_")) {
-                        try {
-                            auto vector_path = entry.path() / "vector.geojson";
-                            auto raster_path = entry.path() / "raster.tiff";
-                            auto zone = Zone::from_files(vector_path, raster_path);
-                            plot_datum = zone.datum();
-                            plot.add_zone(zone);
-                        } catch (const std::exception &e) {
-                            std::cerr << "Warning: Failed to load zone from " << entry.path() << ": " << e.what()
-                                      << std::endl;
-                        }
-                    }
-                }
-            }
-            plot.datum_ = plot_datum;
-            return plot;
-        }
-
-        inline static Plot from_files(const std::filesystem::path &directory, const std::string &name,
-                                      const std::string &type, const dp::Geo &datum) {
-            return load(directory, name, type, datum);
+        inline static Plot load_tar(const std::filesystem::path &tar_file, const std::string &name,
+                                    const std::string &type, const dp::Geo &datum) {
+            (void)name;
+            (void)type;
+            (void)datum;
+            return load_tar(tar_file);
         }
     };
 
-    /**
-     * @brief Builder pattern for constructing Plot objects with fluent interface
-     */
     class PlotBuilder {
       private:
-        // Required fields
         std::optional<std::string> name_;
         std::optional<std::string> type_;
+        std::optional<dp::Polygon> boundary_;
         std::optional<dp::Geo> datum_;
-
-        // Optional fields
+        std::optional<dp::Grid<uint8_t>> initial_grid_;
+        std::optional<double> resolution_;
         std::unordered_map<std::string, std::string> properties_;
 
-        // Zones
-        std::vector<Zone> zones_;
-
-        // Zone builders for deferred construction
-        std::vector<std::function<void(ZoneBuilder &)>> zone_configs_;
-
       public:
-        PlotBuilder() = default;
-
-        // Required configuration methods
         inline PlotBuilder &with_name(const std::string &name) {
             name_ = name;
             return *this;
@@ -393,12 +316,26 @@ namespace zoneout {
             return *this;
         }
 
+        inline PlotBuilder &with_boundary(const dp::Polygon &boundary) {
+            boundary_ = boundary;
+            return *this;
+        }
+
         inline PlotBuilder &with_datum(const dp::Geo &datum) {
             datum_ = datum;
             return *this;
         }
 
-        // Optional configuration methods
+        inline PlotBuilder &with_initial_grid(const dp::Grid<uint8_t> &grid) {
+            initial_grid_ = grid;
+            return *this;
+        }
+
+        inline PlotBuilder &with_resolution(double resolution) {
+            resolution_ = resolution;
+            return *this;
+        }
+
         inline PlotBuilder &with_property(const std::string &key, const std::string &value) {
             properties_[key] = value;
             return *this;
@@ -411,104 +348,49 @@ namespace zoneout {
             return *this;
         }
 
-        // Zone management methods
-        inline PlotBuilder &add_zone(const Zone &zone) {
-            zones_.push_back(zone);
-            return *this;
+        inline bool is_valid() const {
+            return name_.has_value() && type_.has_value() && boundary_.has_value() && datum_.has_value();
         }
-
-        inline PlotBuilder &add_zone(Zone &&zone) {
-            zones_.push_back(std::move(zone));
-            return *this;
-        }
-
-        // Inline zone construction using lambda configurator
-        inline PlotBuilder &add_zone(std::function<void(ZoneBuilder &)> configurator) {
-            zone_configs_.push_back(configurator);
-            return *this;
-        }
-
-        // Bulk zone addition
-        inline PlotBuilder &add_zones(const std::vector<Zone> &zones) {
-            for (const auto &zone : zones) {
-                zones_.push_back(zone);
-            }
-            return *this;
-        }
-
-        // Validation and building
-        inline bool is_valid() const { return validation_error().empty(); }
 
         inline std::string validation_error() const {
-            if (!name_.has_value() || name_->empty()) {
+            if (!name_.has_value() || name_->empty())
                 return "Plot name is required and cannot be empty";
-            }
-
-            if (!type_.has_value() || type_->empty()) {
+            if (!type_.has_value() || type_->empty())
                 return "Plot type is required and cannot be empty";
-            }
-
-            if (!datum_.has_value()) {
+            if (!boundary_.has_value())
+                return "Plot boundary is required";
+            if (!datum_.has_value())
                 return "Plot datum is required";
-            }
-
             return "";
         }
 
         inline Plot build() const {
-            // Validate before building
-            std::string error = validation_error();
-            if (!error.empty()) {
-                throw std::invalid_argument("PlotBuilder validation failed: " + error);
+            if (!is_valid()) {
+                throw std::invalid_argument(validation_error());
             }
 
-            // Create plot
-            Plot plot(name_.value(), type_.value(), datum_.value());
+            Plot plot =
+                initial_grid_.has_value()
+                    ? Plot(name_.value(), type_.value(), boundary_.value(), initial_grid_.value(), datum_.value())
+                    : (resolution_.has_value()
+                           ? Plot(name_.value(), type_.value(), boundary_.value(), datum_.value(), resolution_.value())
+                           : Plot(name_.value(), type_.value(), boundary_.value(), datum_.value()));
 
-            // Add properties
             for (const auto &[key, value] : properties_) {
                 plot.set_property(key, value);
             }
-
-            // Add pre-built zones
-            for (const auto &zone : zones_) {
-                plot.add_zone(zone);
-            }
-
-            // Build and add deferred zones from configurators
-            for (const auto &config : zone_configs_) {
-                ZoneBuilder builder;
-
-                // Use the plot's datum as default if zone doesn't specify one
-                builder.with_datum(datum_.value());
-
-                // Apply configuration
-                config(builder);
-
-                // Validate and build zone
-                if (!builder.is_valid()) {
-                    throw std::invalid_argument("Zone configuration invalid in PlotBuilder: " +
-                                                builder.validation_error());
-                }
-
-                plot.add_zone(builder.build());
-            }
-
             return plot;
         }
 
-        // Reset builder to initial state
         inline void reset() {
             name_.reset();
             type_.reset();
+            boundary_.reset();
             datum_.reset();
+            initial_grid_.reset();
+            resolution_.reset();
             properties_.clear();
-            zones_.clear();
-            zone_configs_.clear();
         }
-
-        // Utility: Get current zone count (including pending builders)
-        inline size_t zone_count() const { return zones_.size() + zone_configs_.size(); }
     };
 
 } // namespace zoneout

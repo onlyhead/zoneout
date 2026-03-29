@@ -1,60 +1,55 @@
 #include "zoneout/zoneout.hpp"
-#include "zoneout/zoneout/constants.hpp"
+
 #include <iostream>
 
 namespace dp = datapod;
 
+namespace {
+    dp::Polygon rectangle(double x, double y, double width, double height) {
+        dp::Polygon poly;
+        poly.vertices.push_back({x, y, 0.0});
+        poly.vertices.push_back({x + width, y, 0.0});
+        poly.vertices.push_back({x + width, y + height, 0.0});
+        poly.vertices.push_back({x, y + height, 0.0});
+        return poly;
+    }
+} // namespace
+
 int main() {
-    std::cout << "=== Zoneout Quickstart Example ===" << std::endl;
+    std::cout << "=== Zoneout Quickstart ===" << std::endl;
 
-    // Step 1: Create a boundary polygon (100m x 50m rectangular field)
-    std::cout << "Creating boundary polygon..." << std::endl;
-    dp::Polygon boundary;
-    boundary.vertices.push_back(dp::Point{0.0, 0.0, 0.0});
-    boundary.vertices.push_back(dp::Point{100.0, 0.0, 0.0});
-    boundary.vertices.push_back(dp::Point{100.0, 50.0, 0.0});
-    boundary.vertices.push_back(dp::Point{0.0, 50.0, 0.0});
-    std::cout << "   Boundary created: " << boundary.vertices.size() << std::endl;
+    const dp::Geo datum{52.0, 5.0, 0.0};
 
-    // Step 2: Create a datum (WGS84 coordinates)
-    dp::Geo datum{52.0, 5.0, 0.0}; // Lat, Lon, Alt
-    std::cout << "Creating datum at lat=" << datum.latitude << ", lon=" << datum.longitude << std::endl;
+    auto farm_plot = zoneout::PlotBuilder()
+                         .with_name("farm")
+                         .with_type("root")
+                         .with_boundary(rectangle(0.0, 0.0, 120.0, 80.0))
+                         .with_datum(datum)
+                         .build();
 
-    // Step 3: Create a zone with auto-generated grid (1m resolution)
-    std::cout << "Creating zone with 1m resolution..." << std::endl;
-    zoneout::Zone zone("test_field", "agricultural", boundary, datum, 1.0);
-    std::cout << "   Zone created: " << zone.name() << " (" << zone.type() << ")" << std::endl;
-    std::cout << "   " << zone.raster_info() << std::endl;
+    zoneout::Zone farm("farm", "root", std::move(farm_plot));
+    farm.set_property("owner", "research_team");
 
-    // Step 4: Add properties to the zone
-    std::cout << "Adding properties to zone..." << std::endl;
-    zone.set_property("crop", "wheat");
-    zone.set_property("season", "2024");
-    std::cout << "   Crop: " << zone.property("crop").value_or("") << std::endl;
-    std::cout << "   Season: " << zone.property("season").value_or("") << std::endl;
+    zoneout::Zone field_a("field_a", "field", rectangle(10.0, 10.0, 40.0, 25.0), datum, 1.0);
+    zoneout::Zone field_b("field_b", "field", rectangle(60.0, 15.0, 35.0, 30.0), datum);
 
-    // Step 5: Test point containment
-    std::cout << "Testing point containment..." << std::endl;
-    dp::Point inside_point{50.0, 25.0, 0.0};
-    dp::Point outside_point{150.0, 25.0, 0.0};
+    farm.add_child(field_a);
+    farm.add_child(field_b);
 
-    bool inside = zone.poly().contains(inside_point);
-    bool outside = zone.poly().contains(outside_point);
+    zoneout::Workspace workspace(std::move(farm));
 
-    std::cout << "   Point (50, 25) is " << (inside ? "inside" : "outside") << " the boundary" << std::endl;
-    std::cout << "   Point (150, 25) is " << (outside ? "inside" : "outside") << " the boundary" << std::endl;
+    auto n1 = workspace.add_node(dp::Point{15.0, 15.0, 0.0}, {{"kind", "entry"}});
+    auto n2 = workspace.add_node(dp::Point{75.0, 25.0, 0.0}, {{"kind", "loading"}}); 
+    auto edge = workspace.add_edge(n1, n2, 1.0, graphix::vertex::EdgeType::Undirected, {{"kind", "lane"}});
 
-    // Step 6: Save the zone
-    std::cout << "Saving zone..." << std::endl;
-    zone.save("quickstart_zone");
-    std::cout << "   Zone saved to ./quickstart_zone/" << std::endl;
+    workspace.save("quickstart_workspace");
 
-    // Step 10: Load the zone
-    std::cout << "Loading zone..." << std::endl;
-    auto loaded_zone = zoneout::Zone::load("quickstart_zone");
-    std::cout << "   Loaded zone: " << loaded_zone.name() << " (" << loaded_zone.type() << ")" << std::endl;
-    std::cout << "   Crop: " << loaded_zone.property("crop").value_or("") << std::endl;
+    std::cout << "Root zone: " << workspace.root_zone().name() << std::endl;
+    std::cout << "Child zones: " << workspace.root_zone().child_count() << std::endl;
+    std::cout << "Graph nodes: " << workspace.graph().vertex_count() << std::endl;
+    std::cout << "Graph edges: " << workspace.graph().edge_count() << std::endl;
+    std::cout << "Saved to ./quickstart_workspace" << std::endl;
+    std::cout << "Edge memberships: " << workspace.graph().edge_property(edge).zone_ids.size() << std::endl;
 
-    std::cout << "=== Quickstart Complete ===" << std::endl;
     return 0;
 }

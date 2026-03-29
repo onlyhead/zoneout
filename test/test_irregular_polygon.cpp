@@ -29,7 +29,7 @@ TEST_CASE("Test irregular polygon alignment") {
         zone.save(output_dir);
 
         // Get the grid info
-        const auto &grid_data = zone.raster_data();
+        const auto &grid_data = zone.plot().grid().raster();
         if (!grid_data.layers.empty()) {
             const auto &first_layer = grid_data.layers[0];
 

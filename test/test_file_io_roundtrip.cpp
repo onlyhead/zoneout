@@ -205,7 +205,7 @@ TEST_CASE("Complete file I/O round-trip test") {
         CHECK(loaded_points.size() == 1);
 
         // Verify raster layers were preserved (should have base grid from resolution)
-        CHECK(loaded_zone.grid().has_layers() == original_zone.grid().has_layers());
+        CHECK(loaded_zone.plot().grid().has_layers() == original_zone.plot().grid().has_layers());
 
         // Clean up test files
         std::filesystem::remove_all(test_dir);

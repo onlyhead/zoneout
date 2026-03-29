@@ -1,210 +1,233 @@
-<img align="right" width="26%" src="./misc/logo.png">
-
 # Zoneout
 
-**C++ Library for Agricultural Robotics Workspace Management**
+**C++ library for agricultural workspace data**
 
-Combines vector geometry (boundaries, features) with raster data (elevation, moisture) for autonomous farming coordination.
+`zoneout` is now organized around four separate concepts:
 
-## Quick Start
+- `Plot`: spatial payload
+- `Zone`: recursive logical region with metadata
+- `Graph`: connectivity network using `graphix`
+- `Workspace`: one zone tree plus one graph
 
-```bash
-git clone https://github.com/your-org/zoneout && cd zoneout
-mkdir build && cd build
-cmake -DZONEOUT_BUILD_EXAMPLES=ON -DZONEOUT_ENABLE_TESTS=ON ..
-make && make test
-./quickstart  # Run 5-minute tutorial
+This replaces the old mental model where `Plot` was a collection of zones and `Zone` tried to be the whole workspace by itself.
+
+## Core Model
+
+```cpp
+struct Plot {
+    Poly poly;                 // mandatory
+    std::optional<Grid> grid;  // optional
+};
+
+struct Zone {
+    UUID id;
+    std::string name;
+    std::string type;
+    Plot plot;
+    std::unordered_map<std::string, std::string> properties;
+    std::vector<Zone> children;
+};
+
+struct NodeData {
+    UUID id;
+    datapod::Point position;
+    std::vector<UUID> zone_ids;
+    std::unordered_map<std::string, std::string> properties;
+};
+
+struct EdgeData {
+    UUID id;
+    std::vector<UUID> zone_ids;
+    std::unordered_map<std::string, std::string> properties;
+};
+
+using Graph = graphix::vertex::Graph<NodeData, EdgeData>;
+
+struct Workspace {
+    Zone root_zone;
+    Graph graph;
+};
 ```
 
-### Minimal Example
+## Quick Start
 
 ```cpp
 #include "zoneout/zoneout.hpp"
 
+namespace dp = datapod;
+
 int main() {
-    // 1. Create boundary (100m × 50m field)
-    concord::Polygon boundary;
-    boundary.addPoint(concord::Point{0, 0, 0});
-    boundary.addPoint(concord::Point{100, 0, 0});
-    boundary.addPoint(concord::Point{100, 50, 0});
-    boundary.addPoint(concord::Point{0, 50, 0});
-    
-    // 2. Create zone with GPS datum and 1m resolution
-    concord::Datum datum{52.0, 5.0, 0.0};  // lat, lon, alt
-    zoneout::Zone zone("field", "agricultural", boundary, datum, 1.0);
-    
-    // 3. Add properties and metadata
-    zone.set_property("crop", "wheat");
-    zone.set_property("season", "spring");
-    
-    // 4. Check point containment
-    bool inside = zone.poly().contains(concord::Point{50, 25, 0});
-    
-    // 5. Add raster data (elevation, moisture, etc.)
-    concord::Grid<uint8_t> elevation_grid(100, 50, 1.0, true, concord::Pose{});
-    zone.add_raster_layer(elevation_grid, "elevation", "terrain");
-    
-    // 6. Add features (obstacles, waypoints)
-    concord::Polygon obstacle;
-    obstacle.addPoint(concord::Point{20, 20, 0});
-    obstacle.addPoint(concord::Point{25, 20, 0});
-    obstacle.addPoint(concord::Point{25, 25, 0});
-    obstacle.addPoint(concord::Point{20, 25, 0});
-    zone.add_polygon_feature(obstacle, "tree", "obstacle");
-    
-    // 7. Save and load
-    zone.save("my_zone");
-    auto loaded = zoneout::Zone::load("my_zone");
-    
-    return 0;
+    dp::Polygon boundary;
+    boundary.vertices.push_back({0.0, 0.0, 0.0});
+    boundary.vertices.push_back({100.0, 0.0, 0.0});
+    boundary.vertices.push_back({100.0, 50.0, 0.0});
+    boundary.vertices.push_back({0.0, 50.0, 0.0});
+
+    dp::Geo datum{52.0, 5.0, 0.0};
+
+    zoneout::Plot farm_plot = zoneout::PlotBuilder()
+                                  .with_name("farm")
+                                  .with_type("root")
+                                  .with_boundary(boundary)
+                                  .with_datum(datum)
+                                  .build();
+
+    zoneout::Zone farm("farm", "root", std::move(farm_plot));
+    farm.set_property("owner", "research_team");
+
+    zoneout::Zone field("field_a", "field", boundary, datum, 1.0);
+    farm.add_child(field);
+
+    zoneout::Workspace workspace(std::move(farm));
+
+    auto a = workspace.add_node(dp::Point{10.0, 10.0, 0.0}, {{"kind", "entry"}});
+    auto b = workspace.add_node(dp::Point{80.0, 40.0, 0.0}, {{"kind", "target"}});
+    workspace.add_edge(a, b, 1.0, graphix::vertex::EdgeType::Undirected, {{"kind", "lane"}});
+
+    workspace.save("farm_workspace");
+    auto loaded = zoneout::Workspace::load("farm_workspace");
+
+    return loaded.graph().edge_count() == 1 ? 0 : 1;
 }
 ```
 
-## Core Concepts
+## Concepts
 
-- **Zone** = Workspace (field/barn) + Vector features + Multi-layer raster data
-- **Poly** = Vector geometry (boundaries, features) with structured elements
-- **Grid** = Multi-layer raster data (elevation, moisture, vegetation)
-- **Plot** = Collection of zones for farm-wide management
-- **Coordinate Systems**: ENU (local meters) + WGS84 (GPS positioning)
-- **Resolution**: Trade-off between detail (0.1m) and performance (5.0m)
+- `Plot` owns geometry and optional raster data only.
+- `Zone` owns identity, metadata, and recursive child zones.
+- `Workspace` owns the root zone tree and the graph.
+- `Graph` is separate from zones. Nodes and edges carry `zone_ids` instead of being owned by zones.
+- Zone nesting uses `depth`, not `layer`.
 
-## API Reference
+## Main APIs
 
-### Zone API
+### Plot
+
 ```cpp
-// Creation
-Zone(name, type, boundary, datum, resolution);
+PlotBuilder()
+    .with_name(...)
+    .with_type(...)
+    .with_boundary(...)
+    .with_datum(...)
+    .with_resolution(...)   // optional, creates a base grid
+    .build();
 
-// Properties
-zone.set_property(key, value);
-zone.get_property(key);
+plot.poly();
+plot.has_grid();
+plot.grid();
+plot.set_grid(...);
+plot.clear_grid();
+plot.save(directory);
+Plot::load(directory);
+```
 
-// Vector geometry access
-zone.poly().contains(point);
-zone.poly().area();
-zone.poly().perimeter();
-zone.poly().has_field_boundary();
+### Zone
 
-// Raster data
-zone.add_raster_layer(grid, name, type, properties, poly_cut);
-zone.raster_data();  // Access underlying geotiv::Raster
+```cpp
+Zone(name, type, boundary, datum);             // poly only
+Zone(name, type, boundary, datum, resolution); // poly + generated grid
+Zone(name, type, Plot{...});
 
-// Features
-zone.add_polygon_feature(geometry, name, type, subtype, properties);
-zone.feature_info();
-zone.raster_info();
+zone.plot();
+zone.poly();
+zone.has_grid();
+zone.plot().grid();
+zone.plot().set_grid(...);
+zone.plot().clear_grid();
 
-// I/O
+zone.add_child(child);
+zone.remove_child(child_id);
+zone.find(zone_id);
+zone.find_by_name(name);
+zone.depth_of(zone_id);
+zone.visit(visitor);
+
+zone.add_raster_layer(...); // creates a grid in the plot if needed
 zone.save(directory);
 Zone::load(directory);
-zone.to_files(vector_path, raster_path);
-Zone::from_files(vector_path, raster_path);
 ```
 
-### Grid API
+### Workspace
+
 ```cpp
-// Grid with metadata
-Grid(name, type, subtype, datum, shift, resolution);
+Workspace(root_zone);
 
-// Properties
-grid.get_name();
-grid.set_name(name);
-grid.get_type();
-grid.is_valid();
+workspace.root_zone();
+workspace.graph();
 
-// Raster operations
-grid.add_grid(width, height, name, type, properties);
-grid.add_grid(grid_data, name, type, properties);
+workspace.add_node(position, properties);
+workspace.add_edge(source, target, weight, type, properties);
 
-// I/O
-Grid::from_file(path);
-grid.to_file(path);
+workspace.find_zone(zone_id);
+workspace.find_node(node_id);
+workspace.find_edge(edge_id);
+workspace.zones_containing(point);
+workspace.refresh_graph_zone_membership();
+
+workspace.save(directory);
+Workspace::load(directory);
 ```
 
-### Poly API
+### Workspace JSON
+
 ```cpp
-// Vector data with structured elements
-Poly(name, type, subtype, boundary, datum, heading, crs);
+WorkspaceJson json = parse_workspace_json_file("workspace.json");
+auto errors = validate_workspace_json(json);
+if (!errors.empty()) {
+    // surface import errors to the UI
+}
 
-// Properties
-poly.get_name();
-poly.set_name(name);
-poly.is_valid();
-poly.has_field_boundary();
-
-// Geometry
-poly.area();
-poly.perimeter();
-poly.contains(point);
-
-// Structured elements
-poly.add_polygon_element(id, name, type, subtype, geometry, props);
-poly.add_line_element(id, name, type, subtype, geometry, props);
-poly.add_point_element(id, name, type, subtype, geometry, props);
-poly.get_polygon_elements();
-poly.get_polygons_by_type(type);
-
-// I/O
-Poly::from_file(path);
-poly.to_file(path, crs);
+Workspace workspace = to_workspace(json);
+write_workspace_json_file("roundtrip.json", workspace);
 ```
 
-### Plot API
-```cpp
-// Multi-zone management
-Plot(name, type, datum);
+Public draft/import APIs:
 
-// Zone management
-plot.add_zone(zone);
-plot.remove_zone(zone_id);
-plot.get_zone(zone_id);
-plot.get_zones();
-plot.get_zone_count();
+- `WorkspaceJson`
+- `ZoneJson`
+- `NodeJson`
+- `EdgeJson`
+- `parse_workspace_json(...)`
+- `parse_workspace_json_file(...)`
+- `workspace_json(...)`
+- `write_workspace_json_file(path, draft)`
+- `write_workspace_json_file(path, workspace)`
+- `validate_workspace_json(...)`
+- `require_valid_workspace_json(...)`
+- `to_workspace(...)`
+- `from_workspace(...)`
+- `load_workspace_json_file(...)`
 
-// Properties
-plot.set_property(key, value);
-plot.get_property(key);
+## Persistence
 
-// I/O
-plot.save(directory);
-plot.save_tar(tar_file);
-Plot::load(directory, name, type, datum);
-Plot::load_tar(tar_file, name, type, datum);
+`Workspace::save()` writes:
+
+```text
+workspace/
+  workspace.json
+  zones/
+    <zone-uuid>/
+      zone.json
+      vector.geojson
+      raster.tiff        # optional
+  graph/
+    graph.json
 ```
 
-## Architecture
+`Workspace::load()` still supports the older temporary layout for compatibility.
 
+The separate UI tool should use `workspace.json` as the interchange format.
+That interchange JSON is intentionally separate from the native `Workspace::save()` directory layout.
+
+## Examples
+
+- [examples/quickstart.cpp](/home/bresilla/data/code/robolibs/zoneout/examples/quickstart.cpp)
+- [examples/builder_pattern_example.cpp](/home/bresilla/data/code/robolibs/zoneout/examples/builder_pattern_example.cpp)
+- [examples/overlapping_zones_plot.cpp](/home/bresilla/data/code/robolibs/zoneout/examples/overlapping_zones_plot.cpp)
+
+## Build
+
+```bash
+make build
+make test
 ```
-┌─────────────────────────────────────────┐
-│              Plot                       │  Farm-level management
-│  (Collection of Zones)                  │
-└──────────────┬──────────────────────────┘
-               │
-               ├──► Zone = Poly + Grid    │  Field-level workspace
-               │     ├─ Vector features   │
-               │     └─ Raster layers     │
-               │
-               ├──► Poly (geoson::Vector) │  Boundaries & features
-               │     └─ Structured elements│
-               │
-               └──► Grid (geotiv::Raster) │  Multi-layer data
-                     └─ Elevation, etc.   │
-```
-
-## Dependencies
-
-- **concord**: Core geometry primitives (Point, Polygon, Grid, Layer)
-- **geoson**: Vector data I/O (GeoJSON format)
-- **geotiv**: Raster data I/O (GeoTIFF format)
-- **entropy**: UUID generation
-- **doctest**: Unit testing framework
-- **C++20**: Modern language features
-
-## License
-
-MIT License - See LICENSE file for details.
-
----
-
-**Built for autonomous agriculture** 🌾🤖

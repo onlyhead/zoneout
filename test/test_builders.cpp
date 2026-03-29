@@ -233,20 +233,28 @@ TEST_CASE("ZoneBuilder reset functionality") {
 
 TEST_CASE("PlotBuilder basic construction") {
     dp::Geo datum{52.0, 5.0, 0.0};
+    auto boundary = create_test_boundary();
 
     SUBCASE("Build valid plot with required fields only") {
-        auto plot = PlotBuilder().with_name("test_plot").with_type("agricultural").with_datum(datum).build();
+        auto plot = PlotBuilder()
+                        .with_name("test_plot")
+                        .with_type("agricultural")
+                        .with_boundary(boundary)
+                        .with_datum(datum)
+                        .build();
 
         CHECK(plot.name() == "test_plot");
         CHECK(plot.type() == "agricultural");
         CHECK(plot.is_valid());
-        CHECK(plot.empty());
+        CHECK_FALSE(plot.has_grid());
+        CHECK(plot.poly().has_field_boundary());
     }
 
     SUBCASE("Build plot with properties") {
         auto plot = PlotBuilder()
                         .with_name("test_plot")
                         .with_type("agricultural")
+                        .with_boundary(boundary)
                         .with_datum(datum)
                         .with_property("owner", "Test Farm")
                         .with_property("location", "Netherlands")
@@ -257,138 +265,43 @@ TEST_CASE("PlotBuilder basic construction") {
     }
 }
 
-TEST_CASE("PlotBuilder with pre-built zones") {
+TEST_CASE("PlotBuilder grid options") {
     dp::Geo datum{52.0, 5.0, 0.0};
     auto boundary = create_test_boundary();
 
-    SUBCASE("Add single zone") {
-        auto zone = ZoneBuilder()
-                        .with_name("field1")
+    SUBCASE("Build plot with generated grid from resolution") {
+        auto plot = PlotBuilder()
+                        .with_name("grid_plot")
                         .with_type("agricultural")
                         .with_boundary(boundary)
                         .with_datum(datum)
+                        .with_resolution(1.0)
                         .build();
 
-        auto plot =
-            PlotBuilder().with_name("test_plot").with_type("agricultural").with_datum(datum).add_zone(zone).build();
-
-        CHECK(plot.zone_count() == 1);
-        CHECK_FALSE(plot.empty());
+        CHECK(plot.has_grid());
+        CHECK(plot.grid().layer_count() == 1);
     }
 
-    SUBCASE("Add multiple zones separately") {
-        auto zone1 = ZoneBuilder()
-                         .with_name("field1")
-                         .with_type("agricultural")
-                         .with_boundary(boundary)
-                         .with_datum(datum)
-                         .build();
-
-        auto zone2 =
-            ZoneBuilder().with_name("field2").with_type("pasture").with_boundary(boundary).with_datum(datum).build();
+    SUBCASE("Build plot with provided initial grid") {
+        dp::Pose shift{dp::Point{0.0, 0.0, 0.0}, dp::Quaternion{}};
+        dp::Grid<uint8_t> base_grid;
+        base_grid.rows = 10;
+        base_grid.cols = 10;
+        base_grid.resolution = 1.0;
+        base_grid.centered = true;
+        base_grid.pose = shift;
+        base_grid.data.resize(100);
 
         auto plot = PlotBuilder()
-                        .with_name("test_plot")
+                        .with_name("grid_plot")
                         .with_type("agricultural")
+                        .with_boundary(boundary)
                         .with_datum(datum)
-                        .add_zone(zone1)
-                        .add_zone(zone2)
+                        .with_initial_grid(base_grid)
                         .build();
 
-        CHECK(plot.zone_count() == 2);
-    }
-
-    SUBCASE("Add zones in bulk") {
-        auto zone1 = ZoneBuilder()
-                         .with_name("field1")
-                         .with_type("agricultural")
-                         .with_boundary(boundary)
-                         .with_datum(datum)
-                         .build();
-
-        auto zone2 =
-            ZoneBuilder().with_name("field2").with_type("pasture").with_boundary(boundary).with_datum(datum).build();
-
-        std::vector<Zone> zones = {zone1, zone2};
-
-        auto plot =
-            PlotBuilder().with_name("test_plot").with_type("agricultural").with_datum(datum).add_zones(zones).build();
-
-        CHECK(plot.zone_count() == 2);
-    }
-}
-
-TEST_CASE("PlotBuilder with inline zone construction") {
-    dp::Geo datum{52.0, 5.0, 0.0};
-    auto boundary = create_test_boundary();
-
-    SUBCASE("Add zone with lambda configurator") {
-        auto plot = PlotBuilder()
-                        .with_name("test_plot")
-                        .with_type("agricultural")
-                        .with_datum(datum)
-                        .add_zone([&boundary](ZoneBuilder &builder) {
-                            builder.with_name("inline_zone")
-                                .with_type("agricultural")
-                                .with_boundary(boundary)
-                                .with_property("inline", "true");
-                        })
-                        .build();
-
-        CHECK(plot.zone_count() == 1);
-        const auto &zones = plot.zones();
-        CHECK(zones[0].name() == "inline_zone");
-        CHECK(zones[0].property("inline").value_or("") == "true");
-    }
-
-    SUBCASE("Add multiple zones with different configurations") {
-        auto boundary1 = create_test_boundary(100.0, 50.0);
-        auto boundary2 = create_test_boundary(80.0, 60.0);
-
-        auto plot =
-            PlotBuilder()
-                .with_name("test_plot")
-                .with_type("agricultural")
-                .with_datum(datum)
-                .add_zone([&boundary1](ZoneBuilder &builder) {
-                    builder.with_name("high_res")
-                        .with_type("experimental")
-                        .with_boundary(boundary1)
-                        .with_resolution(0.5);
-                })
-                .add_zone([&boundary2](ZoneBuilder &builder) {
-                    builder.with_name("low_res").with_type("production").with_boundary(boundary2).with_resolution(2.0);
-                })
-                .build();
-
-        CHECK(plot.zone_count() == 2);
-        const auto &zones = plot.zones();
-        CHECK(zones[0].name() == "high_res");
-        CHECK(zones[1].name() == "low_res");
-    }
-
-    SUBCASE("Mix pre-built and inline zones") {
-        auto zone1 = ZoneBuilder()
-                         .with_name("prebuilt")
-                         .with_type("agricultural")
-                         .with_boundary(boundary)
-                         .with_datum(datum)
-                         .build();
-
-        auto plot = PlotBuilder()
-                        .with_name("test_plot")
-                        .with_type("agricultural")
-                        .with_datum(datum)
-                        .add_zone(zone1)
-                        .add_zone([&boundary](ZoneBuilder &builder) {
-                            builder.with_name("inline").with_type("pasture").with_boundary(boundary);
-                        })
-                        .build();
-
-        CHECK(plot.zone_count() == 2);
-        const auto &zones = plot.zones();
-        CHECK(zones[0].name() == "prebuilt");
-        CHECK(zones[1].name() == "inline");
+        CHECK(plot.has_grid());
+        CHECK(plot.grid().layer_count() == 1);
     }
 }
 
@@ -397,7 +310,7 @@ TEST_CASE("PlotBuilder validation") {
 
     SUBCASE("Missing name fails validation") {
         PlotBuilder builder;
-        builder.with_type("agricultural").with_datum(datum);
+        builder.with_type("agricultural").with_boundary(create_test_boundary()).with_datum(datum);
 
         CHECK_FALSE(builder.is_valid());
         CHECK(builder.validation_error().find("name") != std::string::npos);
@@ -406,7 +319,7 @@ TEST_CASE("PlotBuilder validation") {
 
     SUBCASE("Missing type fails validation") {
         PlotBuilder builder;
-        builder.with_name("test").with_datum(datum);
+        builder.with_name("test").with_boundary(create_test_boundary()).with_datum(datum);
 
         CHECK_FALSE(builder.is_valid());
         CHECK(builder.validation_error().find("type") != std::string::npos);
@@ -415,7 +328,7 @@ TEST_CASE("PlotBuilder validation") {
 
     SUBCASE("Missing datum fails validation") {
         PlotBuilder builder;
-        builder.with_name("test").with_type("agricultural");
+        builder.with_name("test").with_type("agricultural").with_boundary(create_test_boundary());
 
         CHECK_FALSE(builder.is_valid());
         CHECK(builder.validation_error().find("datum") != std::string::npos);
@@ -429,7 +342,11 @@ TEST_CASE("PlotBuilder reset functionality") {
     PlotBuilder builder;
 
     SUBCASE("Reset clears all configuration") {
-        builder.with_name("test1").with_type("agricultural").with_datum(datum).with_property("key", "value");
+        builder.with_name("test1")
+            .with_type("agricultural")
+            .with_boundary(create_test_boundary())
+            .with_datum(datum)
+            .with_property("key", "value");
 
         builder.reset();
 
@@ -437,60 +354,33 @@ TEST_CASE("PlotBuilder reset functionality") {
     }
 
     SUBCASE("Builder can be reused after reset") {
-        auto plot1 = builder.with_name("plot1").with_type("agricultural").with_datum(datum).build();
+        auto plot1 = builder.with_name("plot1")
+                         .with_type("agricultural")
+                         .with_boundary(create_test_boundary())
+                         .with_datum(datum)
+                         .build();
 
         CHECK(plot1.name() == "plot1");
 
         builder.reset();
-        auto plot2 = builder.with_name("plot2").with_type("research").with_datum(datum).build();
+        auto plot2 =
+            builder.with_name("plot2").with_type("research").with_boundary(create_test_boundary()).with_datum(datum).build();
 
         CHECK(plot2.name() == "plot2");
         CHECK(plot2.type() == "research");
     }
 }
 
-TEST_CASE("PlotBuilder zone_count utility") {
+TEST_CASE("PlotBuilder reset and rebuild with different boundaries") {
     dp::Geo datum{52.0, 5.0, 0.0};
-    auto boundary = create_test_boundary();
+    auto boundary1 = create_test_boundary(100.0, 50.0);
+    auto boundary2 = create_test_boundary(60.0, 60.0);
 
-    SUBCASE("Count includes pre-built zones") {
-        auto zone = ZoneBuilder()
-                        .with_name("field1")
-                        .with_type("agricultural")
-                        .with_boundary(boundary)
-                        .with_datum(datum)
-                        .build();
+    PlotBuilder builder;
+    auto plot1 = builder.with_name("test1").with_type("agricultural").with_boundary(boundary1).with_datum(datum).build();
+    CHECK(plot1.poly().area() == doctest::Approx(boundary1.area()));
 
-        PlotBuilder builder;
-        builder.with_name("test").with_type("agricultural").with_datum(datum).add_zone(zone);
-
-        CHECK(builder.zone_count() == 1);
-    }
-
-    SUBCASE("Count includes inline zone configurations") {
-        PlotBuilder builder;
-        builder.with_name("test").with_type("agricultural").with_datum(datum).add_zone([&boundary](ZoneBuilder &b) {
-            b.with_name("z1").with_type("a").with_boundary(boundary);
-        });
-
-        CHECK(builder.zone_count() == 1);
-    }
-
-    SUBCASE("Count includes both pre-built and inline") {
-        auto zone = ZoneBuilder()
-                        .with_name("field1")
-                        .with_type("agricultural")
-                        .with_boundary(boundary)
-                        .with_datum(datum)
-                        .build();
-
-        PlotBuilder builder;
-        builder.with_name("test")
-            .with_type("agricultural")
-            .with_datum(datum)
-            .add_zone(zone)
-            .add_zone([&boundary](ZoneBuilder &b) { b.with_name("z2").with_type("a").with_boundary(boundary); });
-
-        CHECK(builder.zone_count() == 2);
-    }
+    builder.reset();
+    auto plot2 = builder.with_name("test2").with_type("research").with_boundary(boundary2).with_datum(datum).build();
+    CHECK(plot2.poly().area() == doctest::Approx(boundary2.area()));
 }
