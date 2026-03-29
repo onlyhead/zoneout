@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.7] - 2026-03-29
+
+### <!-- 0 -->⛰️  Features
+
+- Add support for local coordinate mode and nodes
+- Add JSON serialization for Workspace
+- Introduce Workspace for holistic management
+- Add Geoget for interactive geographic data input
+
 ## [0.0.6] - 2026-02-20
 
 ### <!-- 2 -->🚜 Refactor
